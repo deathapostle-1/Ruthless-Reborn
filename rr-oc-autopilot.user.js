@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.1
+// @version      2.1.2
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,7 +27,7 @@
 	// #region Configuration
 
 	// ============================== CONSTANTS ==============================
-	const VERSION = "2.1.1";
+	const VERSION = "2.1.2";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const AUTH_REFRESH_MS = 4 * 60 * 1000;
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
@@ -441,6 +441,11 @@
 
 	function onGateChange() {
 		document.body.classList.toggle("rr-oc-authorized", Gate.pass());
+		if (settingsGateHook) {
+			try {
+				settingsGateHook();
+			} catch (e) {}
+		}
 		if (!Gate.pass()) {
 			try {
 				localStorage.removeItem("rr_oc_config");
@@ -1664,9 +1669,11 @@
 
 	let settingsEscapeHandler = null;
 	let settingsTrigger = null;
+	let settingsGateHook = null;
 
 	function closeSettings() {
 		document.getElementById("rr-oc-settings")?.remove();
+		settingsGateHook = null;
 		if (settingsEscapeHandler) {
 			document.removeEventListener("keydown", settingsEscapeHandler);
 			settingsEscapeHandler = null;
@@ -1716,6 +1723,13 @@
 			status.textContent = text;
 			status.dataset.state = state;
 		};
+		settingsGateHook = () => {
+			if (!input.isConnected || !validApiKey(input.value.trim())) return;
+			if (Gate.pass()) setStatus("Valid and authorized", "ok");
+			else if (Gate.state === "denied") setStatus("Access restricted", "bad");
+			else if (Gate.nextTryAt > Date.now()) setStatus("Authorization unavailable", "wait");
+			else setStatus("Verifying access…", "wait");
+		};
 		if (validApiKey(apiKey())) {
 			setStatus(Gate.pass() ? "Valid and authorized" : "API key configured", Gate.pass() ? "ok" : "");
 		}
@@ -1731,7 +1745,10 @@
 			setStatus("Saving…", "wait");
 			try {
 				await applyApiKey(value);
-				setStatus(value ? "Key saved; verifying…" : "No API key set", value ? "wait" : "");
+				if (!value) setStatus("No API key set", "");
+				else if (!Gate.pass() && Gate.state !== "denied") {
+					setStatus("Key saved; verifying…", "wait");
+				}
 			} catch (e) {
 				input.dataset.bad = "1";
 				setStatus("Protected storage unavailable", "bad");
@@ -1785,7 +1802,7 @@
 				Gate.nextTryAt > Date.now() ? "Authorization unavailable" : "Verifying access…";
 		},
 		ensure(tab, gateOnly = false) {
-			const mode = gateOnly ? "gate" : "full";
+			const mode = gateOnly ? "gate" : tab === "Completed" ? "completed" : "full";
 			let bar = document.querySelector(".rr-toolbar");
 			if (bar && bar.dataset.mode !== mode) {
 				bar.remove();
@@ -1793,7 +1810,7 @@
 			}
 			const allowed = gateOnly ?
 				!!listContainer() :
-				tab === "Recruiting" || tab === "Planning";
+				tab === "Recruiting" || tab === "Planning" || tab === "Completed";
 			if (!allowed) {
 				bar?.remove();
 				return;
@@ -1810,12 +1827,18 @@
 			if (!list) return;
 			bar = el("div", "rr-toolbar");
 			bar.dataset.mode = mode;
-			bar.innerHTML = gateOnly ?
+			bar.innerHTML = mode === "gate" ?
 				`
         <span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
 		<span class="rr-auth-state"></span>
 		<button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-      ` :
+	  ` : mode === "completed" ?
+				`
+		<span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
+		<span class="rr-right">
+		  <button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>
+		</span>
+	  ` :
 				`
         <span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
         <span class="rr-count"></span>
@@ -1837,9 +1860,9 @@
         </span>
       `;
 			list.before(bar);
-			if (gateOnly) {
+			if (mode === "gate") {
 				bar.querySelector(".rr-auth-state").textContent = this.gateMessage();
-			} else {
+			} else if (mode === "full") {
 				bar.querySelector(".rr-sort").value = this.state.sort;
 				bar.querySelector(".rr-sort").addEventListener("change", (e) => {
 					this.state.sort = e.target.value;

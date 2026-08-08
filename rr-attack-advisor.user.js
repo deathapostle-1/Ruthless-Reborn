@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.1
+// @version      4.1.2
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -53,14 +53,14 @@
     const SETTINGS_DEFAULTS = {
         v: 1,
         advisor: true,                                      // bonus chips + slot tags + temp verdict
-        buttons: true,                                      // dialog reposition + frame hide
+        buttons: true,                                      // desktop dialog reposition + frame hide
         outcome: true,                                      // leave/mug/hosp filtering
         loglinks: true                                      // defender profile links in the log
     };
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.1';                                // keep in step with @version above
+    const VERSION = '4.1.2';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -326,19 +326,6 @@
         }
     }
 
-    // From Torn's own stylesheet: mobile slots are 100px + 1px margin in an
-    // 80px column; the dialog's containing block (playerWindow) starts at the
-    // column's right edge, so offsets are positive insets from there.
-    function getTopStyleMobile(slotId) {
-        switch (slotId) {
-            case SLOT.PRIMARY: return '2px';
-            case SLOT.SECONDARY: return '103px';
-            case SLOT.MELEE: return '204px';
-            case SLOT.TEMP: return '305px';
-            default: return '204px';
-        }
-    }
-
     // CSS notes, kept out of the shipped stylesheet:
     // - Header-hide rules only bite while .txm-fa-bar precedes the header AND
     //   carries data-txm-mirror="1"; if the bar never builds or React tears it
@@ -360,22 +347,9 @@
         ${sel('dialogWrapper')}[data-txm-dialog] ${sel('dialogButtons')} { visibility: visible; }
         `;
 
-        // Buttons move beside the weapon column on both layouts; each branch is
-        // calibrated to its column geometry (mobile derived from Torn's own
-        // stylesheet). The whole block is a toggleable feature.
-        const positioning = !Session.pass() || !settings.buttons ? '' : compact() ? `
-        ${sel('dialogButtons')} {
-            z-index: 1000;
-            position: absolute;
-            top: ${getTopStyleMobile(slot)};
-            left: 4px;
-            width: 150px;
-            display: flex;
-            flex-direction: column !important;
-            gap: 6px;
-        }
-        ${dialogHide}
-        ` : `
+        // Buttons move only on desktop and Torn's forced "Desktop View".
+        // True Mobile View keeps Torn's native dialog and button placement.
+        const positioning = !Session.pass() || !settings.buttons || compact() ? '' : `
         ${sel('player')}:nth-child(2) ${sel('playerWindow')} {
             overflow: visible;
         }
@@ -2255,7 +2229,7 @@
 
         const FEATURES = [
             ['advisor', 'Bonus advisor', 'Enemy bonus chips, weapon slot tags and the temporary-weapon verdict'],
-            ['buttons', 'Move attack buttons', 'Reposition Start Fight / outcome buttons beside your weapons and hide the emptied dialog frame'],
+            ['buttons', 'Move attack buttons', 'On desktop layouts, reposition Start Fight / outcome buttons beside your weapons and hide the emptied dialog frame'],
             ['outcome', 'Outcome filter', 'Hide the outcome buttons you have not selected in the Attack dropdown'],
             ['loglinks', 'Log profile links', "Link the defender's name in the fight log to their profile"]
         ];
