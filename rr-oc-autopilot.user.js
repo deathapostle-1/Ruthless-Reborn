@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.2
+// @version      2.1.3
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -17,6 +17,7 @@
 // @grant        GM_setValue
 // @grant        GM_deleteValue
 // @connect      api.torn.com
+// @connect      api.torn.zzcraft.net
 // @connect      tornprobability.com
 // @connect      rr-script-auth.deathapostle1.workers.dev
 // ==/UserScript==
@@ -27,8 +28,9 @@
 	// #region Configuration
 
 	// ============================== CONSTANTS ==============================
-	const VERSION = "2.1.2";
+	const VERSION = "2.1.3";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
+	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const AUTH_REFRESH_MS = 4 * 60 * 1000;
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 	const GATE_RETRY_MS = 60 * 1000; // cooldown between failed gate verification attempts
@@ -456,6 +458,8 @@
 			Config.loading = false;
 			TornApi.members = null;
 			TornApi.fetchedAt = 0;
+			TornApi.factionId = null;
+			TornApi.factionRequest = null;
 			FactionCrimes.byId = null;
 			FactionCrimes.fetchedAt = 0;
 			Success.roles = null;
@@ -530,6 +534,36 @@
 	const TornApi = {
 		members: null,
 		fetchedAt: 0,
+		factionId: null,
+		factionRequest: null,
+		ensureFactionId() {
+			if (this.factionId) return Promise.resolve(this.factionId);
+			if (this.factionRequest) return this.factionRequest;
+			const key = apiKey();
+			if (!key || !Gate.pass()) return Promise.resolve(null);
+
+			const gen = Gate.gen;
+			const request = requestJson({
+				url: "https://api.torn.com/v2/user/profile",
+				headers: { Authorization: `ApiKey ${key}` },
+			})
+				.then((data) => {
+					if (gen !== Gate.gen || !Gate.pass()) return null;
+					const factionId = Number(data?.profile?.faction_id);
+					if (!Number.isSafeInteger(factionId) || factionId < 1) return null;
+					this.factionId = factionId;
+					return factionId;
+				})
+				.catch((error) => {
+					log("profile refresh failed", error);
+					return null;
+				})
+				.finally(() => {
+					if (this.factionRequest === request) this.factionRequest = null;
+				});
+			this.factionRequest = request;
+			return request;
+		},
 		async refresh() {
 			const key = apiKey();
 			if (!key || !Gate.pass()) return;
@@ -765,36 +799,31 @@
 		ensure() {
 			if (Date.now() - this.at > this.ttl) this.fetch();
 		},
-		fetch() {
-			if (this.loading || !Gate.pass()) return;
+		async fetch() {
+			const key = apiKey();
+			if (!key || this.loading || !Gate.pass()) return;
 			const gen = Gate.gen;
 			this.loading = true;
-			requestJson({
-					url: AUTH_API + "/v1/oc/policy",
-					headers: {
-						Authorization: `Bearer ${Gate.token}`
-					},
-				})
-				.then((data) => {
-					if (gen !== Gate.gen || !Gate.pass()) return;
-					if (!data || !Array.isArray(data.scenarios)) throw new Error("bad config");
-					this.build(data.scenarios);
-					this.at = Date.now();
-					this.loading = false;
-					renderAll(true);
-				})
-				.catch((error) => {
-					this.loading = false;
-					if (gen !== Gate.gen) return;
-					if (error && (error.status === 401 || error.status === 403)) {
-						Gate.reset();
-						Gate.state = error.status === 403 ? "denied" : "unknown";
-						Gate.nextTryAt = Date.now() + GATE_RETRY_MS;
-						onGateChange();
-					} else {
-						this.at = Date.now() - this.ttl + RETRY_MS;
-					}
+			try {
+				const factionId = await TornApi.ensureFactionId();
+				if (gen !== Gate.gen || !Gate.pass()) return;
+				if (!factionId) throw new Error("faction unavailable");
+				const data = await requestJson({
+					url: `${ZZCRAFT_API}/Factions/${factionId}/OrganizedCrimes/thresholds`,
+					headers: { "X-Api-Key": key },
 				});
+				if (gen !== Gate.gen || !Gate.pass()) return;
+				if (!Array.isArray(data)) throw new Error("bad config");
+				this.build(data);
+				this.at = Date.now();
+				this.loading = false;
+				renderAll(true);
+			} catch (error) {
+				if (gen !== Gate.gen) return;
+				this.loading = false;
+				this.at = Date.now() - this.ttl + RETRY_MS;
+				log("config refresh failed", error);
+			}
 		},
 	};
 
@@ -1670,6 +1699,7 @@
 	let settingsEscapeHandler = null;
 	let settingsTrigger = null;
 	let settingsGateHook = null;
+	let setupPrompted = false;
 
 	function closeSettings() {
 		document.getElementById("rr-oc-settings")?.remove();
@@ -1787,6 +1817,12 @@
 		overlay.appendChild(modal);
 		document.body.appendChild(overlay);
 		input.focus();
+	}
+
+	function promptForApiKey() {
+		if (setupPrompted || validApiKey(apiKey())) return;
+		setupPrompted = true;
+		openSettings(document.querySelector(".rr-gear"));
 	}
 
 	const Toolbar = {
@@ -2090,6 +2126,7 @@
 				apiKeyLoaded = true;
 				Gate.reset();
 				renderAll();
+				safe("setup", promptForApiKey);
 			})
 			.catch(() => {
 				apiKeyLoaded = true;
@@ -2097,6 +2134,7 @@
 				Gate.reset();
 				Gate.state = "denied";
 				onGateChange();
+				safe("setup", promptForApiKey);
 			});
 	});
 

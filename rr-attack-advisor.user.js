@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.2
+// @version      4.1.3
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -60,7 +60,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.2';                                // keep in step with @version above
+    const VERSION = '4.1.3';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -303,6 +303,7 @@
     let barSig = '';                                        // last painted top-bar signature
     let adviceSig = '';                                     // last painted advice-row signature
     let limitsSig = '';                                     // last painted limits/warn signature
+    let setupPrompted = false;
     // #endregion
 
     // #region Styles
@@ -2355,6 +2356,13 @@
 
         overlay.appendChild(modal);
         document.body.appendChild(overlay);
+        input.focus();
+    }
+
+    function promptForApiKey() {
+        if (setupPrompted || validKey(apiKey())) return;
+        setupPrompted = true;
+        openSettings(q(document, '.txm-fa-gear'));
     }
 
     // #endregion
@@ -2544,6 +2552,7 @@
             apiKeyLoaded = true;
             Session.reset();
             safe('sync', sync);
+            safe('setup', promptForApiKey);
         })
         .catch(() => {
             apiKeyLoaded = true;
@@ -2551,6 +2560,7 @@
             Session.reset();
             Session.state = 'denied';
             onSessionChange();
+            safe('setup', promptForApiKey);
         });
 
     // The attack UI is entirely client-rendered - observe rather than race it.
