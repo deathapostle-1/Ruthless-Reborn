@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.3
+// @version      4.1.4
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -68,6 +68,8 @@
     const ZZCRAFT_API = 'https://api.torn.zzcraft.net';
     const AUTH_REFRESH_MS = 4 * 60 * 1000;
     const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
+
+    const ZZCRAFT_USERAGENT = 'rr-attack-userscript/4.1.4'  // User agent used on zzcraft
 
     const TTL_FACTION = 24 * 60 * 60 * 1000;                // our own faction id barely changes
     const TTL_WAR = 5 * 60 * 1000;                          // war state
@@ -1552,7 +1554,7 @@
                     ZZCRAFT_API,
                     'POST',
                     '/auth/login',
-                    { 'Content-Type': 'application/json' },
+                    { 'Content-Type': 'application/json', 'User-Agent': ZZCRAFT_USERAGENT },
                     JSON.stringify({ apikey: apiKey() })
                 );
                 if (gen !== this.gen || !Session.pass()) return null;
@@ -1872,7 +1874,7 @@
             ZZCRAFT_API,
             'GET',
             '/rankedwars/last',
-            { Authorization: `Bearer ${token}` }
+            { Authorization: `Bearer ${token}`, 'User-Agent': ZZCRAFT_USERAGENT  }
         );
     }
 
