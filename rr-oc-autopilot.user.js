@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.3
+// @version      2.1.4
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -31,6 +31,7 @@
 	const VERSION = "2.1.3";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
+	const ZZCRAFT_USERAGENT = 'rr-oc-userscript/2.1.4' // User agent used on zzcraft
 	const AUTH_REFRESH_MS = 4 * 60 * 1000;
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 	const GATE_RETRY_MS = 60 * 1000; // cooldown between failed gate verification attempts
@@ -810,7 +811,7 @@
 				if (!factionId) throw new Error("faction unavailable");
 				const data = await requestJson({
 					url: `${ZZCRAFT_API}/Factions/${factionId}/OrganizedCrimes/thresholds`,
-					headers: { "X-Api-Key": key },
+					headers: { "X-Api-Key": key, 'User-Agent': ZZCRAFT_USERAGENT  },
 				});
 				if (gen !== Gate.gen || !Gate.pass()) return;
 				if (!Array.isArray(data)) throw new Error("bad config");
