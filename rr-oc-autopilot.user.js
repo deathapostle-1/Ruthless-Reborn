@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.4
+// @version      2.1.5
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -16,7 +16,6 @@
 // @grant        GM_getValue
 // @grant        GM_setValue
 // @grant        GM_deleteValue
-// @connect      api.torn.com
 // @connect      api.torn.zzcraft.net
 // @connect      tornprobability.com
 // @connect      rr-script-auth.deathapostle1.workers.dev
@@ -28,31 +27,22 @@
 	// #region Configuration
 
 	// ============================== CONSTANTS ==============================
-	const VERSION = "2.1.3";
+	const VERSION = "2.1.5";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
-	const ZZCRAFT_USERAGENT = 'rr-oc-userscript/2.1.4' // User agent used on zzcraft
+	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
 	const AUTH_REFRESH_MS = 4 * 60 * 1000;
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 	const GATE_RETRY_MS = 60 * 1000; // cooldown between failed gate verification attempts
-	const AMBER_BAND = 4; // success-chance band that still counts as "amber" (close)
 	const API_KEY_STORAGE = "rr_oc_api_key_v2";
 	const LEGACY_API_KEY_STORAGE = "rr_oc_api_key";
 	const FACTION_COLOURS = {
 		accent: "#029e7a",
 		dark: "#1f1f1f"
 	};
-	const SLUG_ALIASES = {
-		pier_pressure: "manifestcruelty",
-		boom_or_bust: "cranereaction",
-	};
-
-	const SUCCESS_GREEN = 0.75; // success pill colour threshold
-	const SUCCESS_AMBER = 0.5; // success pill colour threshold
 	const REFRESH_MS = 5 * 60 * 1000; // API refresh cadence
 	const RETRY_MS = 30 * 1000; // shorter retry window after a failed fetch
 	const RENDER_DEBOUNCE_MS = 120; // renderAll() debounce
-	const VIS_DEBOUNCE_MS = 100; // applyVisibility() debounce
 	const PUMP_DELAY_MS = 250; // Success queue pacing between requests
 
 	// #endregion
@@ -60,7 +50,6 @@
 	// #region Utilities
 
 	// ============================== UTILITIES ==============================
-	const norm = (s) => (s || "").toLowerCase().replace(/[^a-z0-9]/g, "");
 	const sel = (prefix) => `[class*="${prefix}___"]`;
 	const q = (root, s) => root.querySelector(s);
 	const qa = (root, s) => Array.from(root.querySelectorAll(s));
@@ -87,26 +76,6 @@
 	const log = (...a) => {
 		if (DEBUG) console.log("[RR OC Autopilot]", ...a);
 	};
-
-	// ===================== SCENARIO / THRESHOLD HELPERS =====================
-	function requiredFor(key, roleNorm) {
-		const t = Config.thresholds?.[key];
-		return t && roleNorm in t ? t[roleNorm] : null;
-	}
-
-	function resolveScenarioKey(title, slug) {
-		const t = norm(title);
-		if (Config.has(t)) return t;
-		if (slug) {
-			if (SLUG_ALIASES[slug]) return SLUG_ALIASES[slug];
-			const s = norm(slug.replace(/_\d+$/, ""));
-			if (Config.has(s)) return s;
-		}
-		return t || null;
-	}
-
-	const weightFor = (key, roleNorm) =>
-		Config.weights?.[key]?.[roleNorm] ?? null;
 
 	// #endregion
 
@@ -204,6 +173,7 @@
 
 	let authApiKey = "";
 	let apiKeyLoaded = false;
+	let apiKeyChanging = false;
 
 	async function loadApiKey() {
 		let candidate = await secureGet(API_KEY_STORAGE);
@@ -270,6 +240,7 @@
 			headers || {},
 		);
 		const data = body ? JSON.stringify(body) : null;
+		const timeoutMs = new URL(url).origin === AUTH_API ? 25000 : 15000;
 
 		if (
 			typeof window.flutter_inappwebview !== "undefined" &&
@@ -280,13 +251,15 @@
 			const call = method === "POST" ?
 				window.flutter_inappwebview.callHandler(handler, url, hdrs, data) :
 				window.flutter_inappwebview.callHandler(handler, url, hdrs);
-			const timeout = new Promise((_, reject) =>
-				setTimeout(() => reject(new Error("timeout")), 15000),
-			);
-			return Promise.race([Promise.resolve(call), timeout]).then((r) => ({
+			let timeoutId;
+			const timeout = new Promise((_, reject) => {
+				timeoutId = setTimeout(() => reject(new Error("timeout")), timeoutMs);
+			});
+			return Promise.race([Promise.resolve(call), timeout]).finally(() => clearTimeout(timeoutId)).then((r) => ({
 				ok: r.status >= 200 && r.status < 300,
 				status: r.status,
 				text: r.responseText || "",
+					headers: r.responseHeaders || r.headers || "",
 			}));
 		}
 
@@ -302,11 +275,12 @@
 				url,
 				headers: hdrs,
 				data,
-				timeout: 15000,
+				timeout: timeoutMs,
 				onload: (r) => resolve({
 					ok: r.status >= 200 && r.status < 300,
 					status: r.status,
 					text: r.responseText || "",
+					headers: r.responseHeaders || r.headers || "",
 				}),
 				onerror: reject,
 				ontimeout: () => reject(new Error("timeout")),
@@ -320,130 +294,119 @@
 		try {
 			data = JSON.parse(response.text);
 		} catch (e) {
-			throw new Error("Invalid JSON response");
+			if (response.ok) throw new Error("Invalid JSON response");
 		}
 		if (!response.ok) {
 			const error = new Error("HTTP " + response.status);
 			error.status = response.status;
 			error.body = data;
+			error.retryAfter = retryAfterMs(response.headers);
 			throw error;
 		}
 		return data;
 	}
 
-	// ============================== ACCESS GATE ==============================
+	const SESSION_STORAGE = "rr_oc_session_v1";
+	function retryAfterMs(headers) {
+		const raw = typeof headers === "string" ? headers.match(/^retry-after:\s*(.+)$/im)?.[1] : headers?.["retry-after"] || headers?.["Retry-After"];
+		if (!raw) return 0;
+		const seconds = Number(raw);
+		return Math.max(0, Number.isFinite(seconds) ? seconds * 1000 : Date.parse(raw) - Date.now()) || 0;
+	}
+	async function keyFingerprint(key) {
+		const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(key));
+		return Array.from(new Uint8Array(hash), b => b.toString(16).padStart(2, "0")).join("");
+	}
 	const Gate = {
-		state: "unknown", // unknown | ok | denied
-		token: null,
-		expiresAt: 0,
-		nextTryAt: 0,
-		busy: false,
-		gen: 0,
-		refreshTimer: null,
-		pass() {
-			return this.state === "ok" && !!this.token && Date.now() < this.expiresAt;
-		},
+		state: "unknown", token: null, expiresAt: 0, renewedAt: 0, playerId: null, factionId: null,
+		nextTryAt: 0, busy: false, gen: 0, refreshTimer: null, expiryTimer: null,
+		pass() { return this.state === "ok" && !!this.token && Date.now() < this.expiresAt; },
 		reset() {
 			this.gen++;
 			if (this.refreshTimer) clearTimeout(this.refreshTimer);
-			this.refreshTimer = null;
-			this.busy = false;
-			this.state = "unknown";
-			this.token = null;
-			this.expiresAt = 0;
-			this.nextTryAt = 0;
+			if (this.expiryTimer) clearTimeout(this.expiryTimer);
+			this.expiryTimer = null;
+			Object.assign(this, { refreshTimer: null, busy: false, state: "unknown", token: null, expiresAt: 0, renewedAt: 0, playerId: null, factionId: null, nextTryAt: 0 });
 		},
 		scheduleRefresh() {
 			if (this.refreshTimer) clearTimeout(this.refreshTimer);
-			const remaining = this.expiresAt - Date.now() - AUTH_EXPIRY_SKEW_MS;
-			const delay = Math.max(1000, Math.min(AUTH_REFRESH_MS, remaining));
-			this.refreshTimer = setTimeout(() => {
-				void this.refresh(true);
-			}, delay);
+			const delay = Math.max(1000, Math.min(this.renewedAt + AUTH_REFRESH_MS, this.expiresAt - AUTH_EXPIRY_SKEW_MS) - Date.now());
+			this.refreshTimer = setTimeout(() => void this.refresh(true), delay);
 		},
-		deferRetry() {
-			const remaining = this.expiresAt - Date.now() - AUTH_EXPIRY_SKEW_MS;
-			const stillValid = !!this.token && remaining > 0;
-			if (!stillValid) {
-				this.token = null;
-				this.expiresAt = 0;
-			}
-			this.state = stillValid ? "ok" : "unknown";
-			const delay = stillValid ?
-				Math.max(1000, Math.min(30000, remaining)) : GATE_RETRY_MS;
-			this.nextTryAt = Date.now() + delay;
+		deferRetry(delay = GATE_RETRY_MS) {
+			this.state = this.token && Date.now() < this.expiresAt ? "ok" : "unknown";
+			this.nextTryAt = Date.now() + Math.max(GATE_RETRY_MS, delay);
 			if (this.refreshTimer) clearTimeout(this.refreshTimer);
-			this.refreshTimer = setTimeout(() => {
-				this.nextTryAt = 0;
-				void this.refresh(true);
-			}, delay);
+			this.refreshTimer = setTimeout(() => void this.refresh(true), this.nextTryAt - Date.now());
 			onGateChange();
 		},
-		async refresh(force = false) {
-			const key = apiKey();
-			if (!key) {
-				if (this.state !== "denied" || this.token) {
-					this.reset();
-					this.state = "denied";
+		accept(saved) {
+			const now = Date.now();
+			if (!saved || typeof saved.token !== "string" || !saved.token.length || saved.token.length > 4096 ||
+				!Number.isFinite(saved.expiresAt) || saved.expiresAt <= now + AUTH_EXPIRY_SKEW_MS || saved.expiresAt > now + 5 * 60 * 1000 ||
+				!Number.isFinite(saved.renewedAt) || saved.renewedAt > now || saved.renewedAt < now - 5 * 60 * 1000 ||
+				!Number.isSafeInteger(saved.playerId) || saved.playerId < 1 || !Number.isSafeInteger(saved.factionId) || saved.factionId < 1) return false;
+			Object.assign(this, { token: saved.token, expiresAt: saved.expiresAt, renewedAt: saved.renewedAt, playerId: saved.playerId, factionId: saved.factionId, state: "ok", nextTryAt: 0 });
+			if (this.expiryTimer) clearTimeout(this.expiryTimer);
+			this.expiryTimer = setTimeout(() => {
+				if (Date.now() >= this.expiresAt) {
+					this.token = null;
+					this.state = "unknown";
 					onGateChange();
 				}
-				return;
-			}
-			if (!force && this.pass() && Date.now() < this.expiresAt - AUTH_EXPIRY_SKEW_MS) {
-				return;
-			}
-			if (this.busy || Date.now() < this.nextTryAt) {
-				return;
-			}
+			}, this.expiresAt - Date.now() + 10);
+			this.scheduleRefresh();
+			onGateChange();
+			return true;
+		},
+		async refresh(force = false) {
+			if (apiKeyChanging) return;
+			const key = apiKey();
+			if (!key) { if (this.state !== "denied") { this.reset(); this.state = "denied"; onGateChange(); } return; }
+			if ((!force && this.pass() && Date.now() < this.expiresAt - AUTH_EXPIRY_SKEW_MS) || this.busy || Date.now() < this.nextTryAt) return;
 			const gen = this.gen;
 			this.busy = true;
 			try {
-				const response = await requestRaw({
-					method: "POST",
-					url: AUTH_API + "/v1/session",
-					body: { apiKey: key, app: "oc-autopilot", clientVersion: VERSION },
-				});
-				if (gen !== this.gen) return;
-
-				if (response.status === 200) {
-					const data = JSON.parse(response.text);
-					const expiresAt = Number(data.expiresAt) * 1000;
-					if (
-						typeof data.token !== "string" ||
-						!Number.isFinite(expiresAt) ||
-						expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS
-					) {
-						throw new Error("Invalid authorization response");
-					}
-					this.token = data.token;
-					this.expiresAt = expiresAt;
-					this.state = "ok";
-					this.nextTryAt = 0;
-					this.scheduleRefresh();
-					onGateChange();
-					return;
-				}
-
-				if (response.status === 401 || response.status === 403) {
-					this.token = null;
-					this.expiresAt = 0;
-					this.state = "denied";
-					this.nextTryAt = Date.now() + GATE_RETRY_MS;
-					onGateChange();
-				} else {
-					this.deferRetry();
-				}
-			} catch (e) {
-				if (gen !== this.gen) return;
-				this.deferRetry();
-			} finally {
-				if (gen === this.gen) this.busy = false;
-			}
+				const fingerprint = await keyFingerprint(key);
+				const renew = async () => {
+					if (gen !== this.gen || key !== apiKey() || await secureGet(API_KEY_STORAGE) !== key) return;
+					const saved = await secureGet(SESSION_STORAGE);
+					if (gen !== this.gen || key !== apiKey()) return;
+					if (saved?.keyFingerprint === fingerprint && (!force || saved.renewedAt + AUTH_REFRESH_MS > Date.now()) && this.accept(saved)) return;
+					const response = await requestRaw({ method: "POST", url: AUTH_API + "/v1/session", body: { apiKey: key, app: "oc-autopilot", clientVersion: VERSION } });
+					if (gen !== this.gen || key !== apiKey() || await secureGet(API_KEY_STORAGE) !== key) return;
+					if (response.status === 200) {
+						const data = JSON.parse(response.text);
+						const session = { token: data.token, expiresAt: Number(data.expiresAt) * 1000, renewedAt: Date.now(), playerId: data.playerId, factionId: data.factionId, keyFingerprint: fingerprint };
+						if (!this.accept(session)) throw new Error("Invalid authorization response");
+						await secureSet(SESSION_STORAGE, session);
+					} else if (response.status === 401 || response.status === 403) {
+						await secureDelete(SESSION_STORAGE);
+						if (gen !== this.gen) return;
+						this.token = null; this.expiresAt = 0; this.state = "denied"; this.nextTryAt = Date.now() + GATE_RETRY_MS; onGateChange();
+					} else this.deferRetry(retryAfterMs(response.headers));
+				};
+				if (navigator.locks?.request) await navigator.locks.request("rr-oc-session", renew);
+				else await renew();
+			} catch (e) { if (gen === this.gen) this.deferRetry(); }
+			finally { if (gen === this.gen) this.busy = false; }
 		},
 	};
 
+	async function denyProtected(status, gen, token) {
+		if (gen !== Gate.gen || token !== Gate.token) return;
+		Gate.reset();
+		const deniedGen = Gate.gen;
+		Gate.state = status === 403 ? "denied" : "unknown";
+		Gate.nextTryAt = Date.now() + GATE_RETRY_MS;
+		onGateChange();
+		await secureDelete(SESSION_STORAGE);
+		if (deniedGen === Gate.gen) Gate.refreshTimer = setTimeout(() => void Gate.refresh(), GATE_RETRY_MS);
+	}
+
 	function onGateChange() {
-		document.body.classList.toggle("rr-oc-authorized", Gate.pass());
+		if (!Gate.pass() && document.body.classList.contains("rr-oc-authorized")) document.body.classList.remove("rr-oc-authorized");
+		else if (Gate.pass() && Analysis.result && !document.body.classList.contains("rr-oc-authorized")) document.body.classList.add("rr-oc-authorized");
 		if (settingsGateHook) {
 			try {
 				settingsGateHook();
@@ -453,8 +416,8 @@
 			try {
 				localStorage.removeItem("rr_oc_config");
 			} catch (e) {}
-			Config.thresholds = null;
-			Config.weights = null;
+			Config.data = null;
+			Analysis.reset();
 			Config.at = 0;
 			Config.loading = false;
 			TornApi.members = null;
@@ -465,6 +428,7 @@
 			FactionCrimes.fetchedAt = 0;
 			Success.roles = null;
 			Success.loading = false;
+			Success.nextRolesAt = 0;
 			Success.cache.clear();
 			Success.queue.length = 0;
 		}
@@ -473,6 +437,7 @@
 
 	// Strips every injected element/class so a denied user sees a completely stock page.
 	function teardownAll() {
+		if (document.body.classList.contains("rr-oc-authorized")) document.body.classList.remove("rr-oc-authorized");
 		const bar = document.querySelector(".rr-toolbar");
 		if (bar && bar.dataset.mode !== "gate") bar.remove();
 		qa(document, ".rr-meta, .rr-cp, .rr-info, .rr-stat, .rr-lock").forEach(
@@ -486,6 +451,7 @@
 			".rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey",
 		).forEach((w) => w.classList.remove(...FILL));
 		for (const p of qa(document, "div[data-oc-id]")) {
+			p.removeAttribute("aria-busy");
 			delete p.dataset.rrFp;
 			delete p.dataset.rrLevel;
 			delete p.dataset.rrOpen;
@@ -494,11 +460,32 @@
 			p.style.order = "";
 		}
 		panelNodes.clear();
+		restoreNativeEdits(document);
 		const list = listContainer();
 		if (list) {
 			list.style.display = "";
 			list.style.flexDirection = "";
 		}
+	}
+
+	// A changed observation invalidates only this panel, not the toolbar or other OCs.
+	function clearPanelDecision(panel, keepRequirements = false) {
+		// Keep layout nodes while their replacement decision is in flight. Do not
+		// keep stale eligibility, occupant status or probability as a current result.
+		if (panel.getAttribute("aria-busy") !== "true") panel.setAttribute("aria-busy", "true");
+		qa(panel, ".rr-stat, .rr-lock").forEach(n => n.remove());
+		qa(panel, ".rr-role.rr-item-missing").forEach(h => h.classList.remove("rr-item-missing"));
+		qa(panel, ".rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey").forEach(w => {
+			for (const fill of FILL) if (w.classList.contains(fill) !== (fill === "rr-fill-grey")) w.classList.toggle(fill, fill === "rr-fill-grey");
+		});
+		if (!keepRequirements) qa(panel, ".rr-meta .rr-v").forEach(n => { if (n.textContent !== "…") n.textContent = "…"; });
+		const pill = panel.querySelector(".rr-success");
+		if (pill) {
+			const text = Analysis.error ? "Success: unavailable" : "Success: …";
+			if (pill.textContent !== text) pill.textContent = text;
+			pill.style.setProperty("--rr-c", "#868e96");
+		}
+		delete panel.dataset.rrFp;
 	}
 
 	// ========================== STATUS DEFINITIONS ==========================
@@ -537,45 +524,19 @@
 		fetchedAt: 0,
 		factionId: null,
 		factionRequest: null,
-		ensureFactionId() {
-			if (this.factionId) return Promise.resolve(this.factionId);
-			if (this.factionRequest) return this.factionRequest;
-			const key = apiKey();
-			if (!key || !Gate.pass()) return Promise.resolve(null);
-
-			const gen = Gate.gen;
-			const request = requestJson({
-				url: "https://api.torn.com/v2/user/profile",
-				headers: { Authorization: `ApiKey ${key}` },
-			})
-				.then((data) => {
-					if (gen !== Gate.gen || !Gate.pass()) return null;
-					const factionId = Number(data?.profile?.faction_id);
-					if (!Number.isSafeInteger(factionId) || factionId < 1) return null;
-					this.factionId = factionId;
-					return factionId;
-				})
-				.catch((error) => {
-					log("profile refresh failed", error);
-					return null;
-				})
-				.finally(() => {
-					if (this.factionRequest === request) this.factionRequest = null;
-				});
-			this.factionRequest = request;
-			return request;
-		},
+		ensureFactionId() { return Promise.resolve(Gate.pass() ? Gate.factionId : null); },
 		async refresh() {
 			const key = apiKey();
 			if (!key || !Gate.pass()) return;
 			if (Date.now() - this.fetchedAt < REFRESH_MS) return;
 			const gen = Gate.gen;
+			const token = Gate.token;
 			this.fetchedAt = Date.now();
 			try {
 				const r = await requestJson({
-					url: "https://api.torn.com/v2/faction/members",
+					url: AUTH_API + "/v1/faction/members",
 					headers: {
-						Authorization: `ApiKey ${key}`,
+						Authorization: `Bearer ${token}`,
 					},
 				});
 				if (gen === Gate.gen && Gate.pass() && r && Array.isArray(r.members)) {
@@ -590,8 +551,12 @@
 					renderAll();
 				}
 			} catch (e) {
-				// Shorter retry window after a transient failure (mobile networks)
-				this.fetchedAt = Date.now() - REFRESH_MS + RETRY_MS;
+				if (gen !== Gate.gen) return;
+				if (e.status === 401 || e.status === 403) {
+					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
+					await denyProtected(e.status, gen, token); return;
+				}
+				this.fetchedAt = Date.now() - REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
 				log("members refresh failed", e);
 			}
 		},
@@ -607,66 +572,43 @@
 			if (!Gate.pass()) return;
 			if (Date.now() - this.fetchedAt < REFRESH_MS) return;
 			const gen = Gate.gen;
+			const token = Gate.token;
 			this.fetchedAt = Date.now();
 			try {
 				const r = await requestJson({
 					url: AUTH_API + "/v1/oc/crimes",
 					headers: {
-						Authorization: `Bearer ${Gate.token}`,
+						Authorization: `Bearer ${token}`,
 					},
 				});
 				if (gen === Gate.gen && Gate.pass() && r && Array.isArray(r.crimes)) {
-					const map = {};
-					for (const c of r.crimes) {
-						const roles = {};
-						for (const s of c.slots || []) {
-							const req = s.item_requirement;
-							if (req) {
-								roles[norm(s.position)] = {
-									available: req.is_available !== false
-								};
-							}
-						}
-						map[c.id] = {
-							roles,
-							status: c.status
-						};
-					}
-					this.byId = map;
+					this.byId = Object.fromEntries(r.crimes.map(c => [c.id, c]));
 					renderAll();
 				}
 			} catch (e) {
 				if (gen !== Gate.gen) return;
 				if (e && (e.status === 401 || e.status === 403)) {
-					Gate.reset();
-					Gate.state = e.status === 403 ? "denied" : "unknown";
-					Gate.nextTryAt = Date.now() + GATE_RETRY_MS;
-					onGateChange();
-					return;
+					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
+					await denyProtected(e.status, gen, token); return;
 				}
-				this.fetchedAt = Date.now() - REFRESH_MS + RETRY_MS;
+				this.fetchedAt = Date.now() - REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
 				log("crimes refresh failed", e);
 			}
 		},
-		missingItem(ocId, roleNorm) {
-			const r = this.byId?.[ocId]?.roles?.[roleNorm];
-			return r && !r.available ? r : null;
-		},
-		failed(ocId) {
-			return /fail/i.test(this.byId?.[ocId]?.status || "");
-		},
+
 	};
 
 	const Success = {
 		api: "https://tornprobability.com:3000/api/",
 		roles: null,
 		loading: false,
+		nextRolesAt: 0,
 		cache: new Map(),
 		queue: [],
 		busy: false,
 		busyJob: null,
 		ensureRoles() {
-			if (this.roles || this.loading || !Gate.pass()) return;
+			if (this.roles || this.loading || !Gate.pass() || Date.now() < this.nextRolesAt) return;
 			const gen = Gate.gen;
 			this.loading = true;
 			requestJson({
@@ -679,22 +621,11 @@
 					renderAll(true);
 				})
 				.catch(() => {
+					if (gen !== Gate.gen) return;
 					this.loading = false;
+					this.nextRolesAt = Date.now() + RETRY_MS;
+					setTimeout(scheduleRender, RETRY_MS);
 				});
-		},
-		scenarioName(title) {
-			if (!this.roles) return null;
-			const t = norm(title);
-			return Object.keys(this.roles).find((k) => norm(k) === t) || null;
-		},
-		order(scenario) {
-			const map = this.roles?.[scenario];
-			if (!map) return null;
-			return Object.keys(map)
-				.sort((a, b) => a.localeCompare(b, undefined, {
-					numeric: true
-				}))
-				.map((k) => norm(map[k]));
 		},
 		get(scenario, params, cb) {
 			const key = scenario + "|" + params.join(",");
@@ -703,8 +634,8 @@
 				return;
 			}
 			const pending =
-				this.queue.find((j) => j.key === key) ||
-				(this.busyJob?.key === key ? this.busyJob : null);
+				this.queue.find((j) => j.key === key && j.gen === Gate.gen) ||
+				(this.busyJob?.key === key && this.busyJob.gen === Gate.gen ? this.busyJob : null);
 			if (pending) {
 				pending.cbs.push(cb);
 				return;
@@ -733,7 +664,7 @@
 				})
 				.then((r) => {
 					if (job.gen !== Gate.gen || !Gate.pass()) return;
-					if (!r || typeof r.successChance !== "number") {
+					if (!r || !Number.isFinite(r.successChance) || r.successChance < 0 || r.successChance > 1) {
 						throw new Error("bad response");
 					}
 					this.cache.set(job.key, r.successChance);
@@ -743,7 +674,10 @@
 					if (job.gen === Gate.gen && Gate.pass() && ++job.tries < 3) {
 						this.queue.push(job);
 					} else {
-						job.cbs.forEach((cb) => cb(null));
+						if (job.gen === Gate.gen && Gate.pass()) {
+							this.cache.set(job.key, null);
+							job.cbs.forEach((cb) => cb(null));
+						}
 					}
 				})
 				.finally(() =>
@@ -758,43 +692,15 @@
 
 	// =================== OC THRESHOLDS / WEIGHTS CONFIG (ZZCRAFT) ===================
 	const Config = {
-		thresholds: null,
-		weights: null,
+		data: null,
 		loading: false,
 		at: 0,
 		ttl: 6 * 60 * 60 * 1000,
-		has(key) {
-			return !!(this.thresholds && (this.thresholds[key] || this.weights[key]));
-		},
-		build(arr) {
-			const th = {},
-				wt = {};
-			for (const sc of arr) {
-				const k = norm(sc.name);
-				th[k] = {};
-				wt[k] = {};
-				for (const r of sc.roles || []) {
-					const rk = norm(r.label);
-					// Coerce to finite numbers — interpolated into innerHTML later, so bad backend data can't inject markup.
-					if (r.minimumSuccessChance != null) {
-						const n = Number(r.minimumSuccessChance);
-						if (Number.isFinite(n)) th[k][rk] = n;
-					}
-					if (r.weight != null) {
-						const w = Number(r.weight);
-						if (Number.isFinite(w)) wt[k][rk] = w;
-					}
-				}
-			}
-			this.thresholds = th;
-			this.weights = wt;
-		},
 		load() {
 			try {
 				localStorage.removeItem("rr_oc_config");
 			} catch (e) {}
-			this.thresholds = null;
-			this.weights = null;
+			this.data = null;
 			this.at = 0;
 		},
 		ensure() {
@@ -815,7 +721,7 @@
 				});
 				if (gen !== Gate.gen || !Gate.pass()) return;
 				if (!Array.isArray(data)) throw new Error("bad config");
-				this.build(data);
+				this.data = data;
 				this.at = Date.now();
 				this.loading = false;
 				renderAll(true);
@@ -1282,7 +1188,7 @@
 			slugEl?.getAttribute("style")?.match(/scenario\/([a-z0-9_]+)\//)?.[1] ||
 			null;
 		const level = parseInt(q(panel, sel("levelValue"))?.textContent || "0", 10);
-		const key = resolveScenarioKey(title, slug);
+
 		const slots = qa(panel, sel("slotHeader")).map((header) => {
 			const wrap = header.parentElement;
 			const role = q(header, sel("title"))?.textContent.trim() || "";
@@ -1295,7 +1201,6 @@
 				wrap,
 				header,
 				role,
-				roleNorm: norm(role),
 				chance: isNaN(chance) ? null : chance,
 				xid,
 			};
@@ -1305,12 +1210,41 @@
 			ocId: panel.getAttribute("data-oc-id"),
 			title,
 			level,
-			key,
+			slug,
 			slots,
 		};
 	}
 
 	const panelNodes = new Map();
+	const nativeContents = new Map();
+	const nativePositions = new Map();
+	const sameChildren = (node, children) => node.childNodes.length === children.length && children.every((child, i) => node.childNodes[i] === child);
+	const ownsNativeContents = (node, record) => sameChildren(node, record.applied) && node.innerHTML === record.markup;
+
+	function editNativeContents(node, update) {
+		let record = nativeContents.get(node);
+		if (!record || !ownsNativeContents(node, record)) record = { original: Array.from(node.childNodes) };
+		update();
+		record.applied = Array.from(node.childNodes);
+		record.markup = node.innerHTML;
+		nativeContents.set(node, record);
+	}
+
+	function restoreNativeEdits(root) {
+		for (const [node, record] of nativeContents) {
+			if (root !== document && root !== node && !root.contains(node)) continue;
+			if (ownsNativeContents(node, record)) node.replaceChildren(...record.original);
+			nativeContents.delete(node);
+		}
+		for (const [node, original] of nativePositions) {
+			if (root !== document && root !== node && !root.contains(node)) continue;
+			if (node.style.position === "relative" && !node.style.getPropertyPriority("position")) {
+				if (original.value) node.style.setProperty("position", original.value, original.priority);
+				else node.style.removeProperty("position");
+			}
+			nativePositions.delete(node);
+		}
+	}
 
 	function cacheNode(ocId, kind, node) {
 		if (!ocId) return;
@@ -1331,9 +1265,9 @@
 	}
 
 	// ============================== SLOT RENDERING ==============================
-	function renderMeta(slot, key) {
-		const w = weightFor(key, slot.roleNorm);
-		const req = requiredFor(key, slot.roleNorm);
+	function renderMeta(slot, decision) {
+		const w = decision.weight;
+		const req = decision.required;
 		const html =
 			`<div class="rr-cell"><div class="rr-l">Min</div><div class="rr-v">${req == null ? "--" : req}</div></div>` +
 			`<div class="rr-cell"><div class="rr-l">Weight</div><div class="rr-v">${w == null ? "--.--%" : Number(w).toFixed(2) + "%"}</div></div>`;
@@ -1349,17 +1283,8 @@
 			?.getAttribute("data-oc-id");
 		const ring = slot.wrap.querySelector(sel("planning"));
 		const deg = ring && (ring.getAttribute("style") || "").match(/([\d.]+)deg/);
-		const glyph =
-			slot.xid && !ring ?
-			slot.wrap.querySelector(sel("slotIcon"))?.innerHTML || "" :
-			"";
-		const failed =
-			FactionCrimes.failed(ocId) ||
-			!!slot.wrap.closest(sel("failed")) ||
-			// Last-resort glyph sniff, only when we have no authoritative crimes data
-			(!FactionCrimes.byId &&
-				/#ff794c/i.test(glyph) &&
-				/3\.729/.test(glyph));
+		const index = qa(slot.wrap.closest("div[data-oc-id]"), sel("slotHeader")).findIndex(h => h.parentElement === slot.wrap);
+		const failed = Analysis.result?.panels.find(p => p.ocId === ocId)?.slots[index]?.failed || false;
 		let bar = slot.wrap.querySelector(".rr-cp");
 		if (!failed && !deg) {
 			bar?.remove();
@@ -1378,88 +1303,27 @@
 		if (bar.firstChild.style.width !== pct) bar.firstChild.style.width = pct;
 	}
 
-	function renderInfoRow(info, tab) {
-		const {
-			panel,
-			ocId,
-			title,
-			slots
-		} = info;
-		const titleEl = q(panel, sel("panelTitle"));
-		let row = panel.querySelector(".rr-info") || panelNodes.get(ocId)?.info;
-		qa(panel, ".rr-info").forEach((r) => r !== row && r.remove());
-		const drop = () => {
-			row?.remove();
-			cacheNode(ocId, "info", null);
-			cacheNode(ocId, "success", null);
-		};
-
-		let pill = null,
-			queue = null;
-		if (
-			tab !== "Recruiting" &&
-			titleEl &&
-			slots.length &&
-			slots.every((s) => s.chance != null)
-		) {
-			Success.ensureRoles();
-			const scenario = Success.scenarioName(title);
-			const order = scenario && Success.order(scenario);
-			if (order) {
-				const params = Array(order.length).fill(null);
-				for (const s of slots) {
-					const i = order.indexOf(s.roleNorm);
-					if (i >= 0) params[i] = s.chance;
-				}
-				if (!params.some((p) => p == null)) {
-					pill =
-						panel.querySelector(".rr-success") ||
-						panelNodes.get(ocId)?.success ||
-						el("span", "rr-success");
-					cacheNode(ocId, "success", pill);
-					const line = pill;
-					const show = (v) => {
-						if (panelNodes.get(ocId)?.success !== line) return;
-						if (v == null) {
-							line.style.removeProperty("--rr-c");
-							line.innerHTML = `<span class="rr-pip" style="background:#868e96"></span>Success: n/a`;
-							return;
-						}
-						const c =
-							v >= SUCCESS_GREEN ?
-							FACTION_COLOURS.accent :
-							v >= SUCCESS_AMBER ?
-							"#db7b2b" :
-							"#cc3232";
-						line.style.setProperty("--rr-c", c);
-						line.innerHTML = `<span class="rr-pip" style="background:${c}"></span>Success: ${(v * 100).toFixed(2)}%`;
-						panel.dataset.rrSuccess = (v * 100).toFixed(2); // for the success sort
-						if (Toolbar.state.sort.startsWith("success")) {
-							scheduleVisibility();
-						}
-					};
-					const key = scenario + "|" + params.join(",");
-					if (Success.cache.has(key)) show(Success.cache.get(key));
-					else {
-						if (!/%|n\/a/.test(line.textContent)) {
-							line.innerHTML = `<span class="rr-pip" style="background:#868e96"></span>Success: …`;
-						}
-						queue = () => Success.get(scenario, params, show);
-					}
-				}
-			}
-		}
-		if (!pill) return drop();
-		if (!row) row = el("div", "rr-info");
-		qa(panel, ".rr-success").forEach((p) => p !== pill && p.remove());
-		if (row.firstChild !== pill) row.prepend(pill);
-		if (!panel.contains(row)) titleEl?.after(row);
+	function renderInfoRow(info, decision) {
+		const { panel, ocId } = info;
+		if (!decision.probability) { panel.querySelector(".rr-info")?.remove(); cacheNode(ocId, "info", null); return; }
+		let row = panel.querySelector(".rr-info") || el("div", "rr-info");
+		let pill = row.querySelector(".rr-success") || el("span", "rr-success");
+		const c = decision.successColour || "#868e96";
+		pill.style.setProperty("--rr-c", c);
+		const result = Analysis.error ? "unavailable" : decision.success == null ? (Success.cache.has(decision.probability.key) ? "n/a" : "…") : (decision.success * 100).toFixed(2) + "%";
+		const html = `<span class="rr-pip" style="background:${c}"></span>Success: ${result}`;
+		if (pill.innerHTML !== html) pill.innerHTML = html;
+		if (!row.contains(pill)) row.appendChild(pill);
+		if (!panel.contains(row)) q(panel, sel("panelTitle"))?.after(row);
 		cacheNode(ocId, "info", row);
-		if (queue) queue();
+		cacheNode(ocId, "success", pill);
+		const query = decision.probability;
+		if (!Success.cache.has(query.key)) Success.get(query.scenario, query.params, scheduleRender);
 	}
 
 	const relative = (e) => {
 		if (getComputedStyle(e).position === "static") {
+			nativePositions.set(e, { value: e.style.position, priority: e.style.getPropertyPriority("position") });
 			e.style.position = "relative";
 		}
 	};
@@ -1469,17 +1333,6 @@
 		"rr-fill-red",
 		"rr-fill-grey",
 	];
-
-	function clearSlot(wrap) {
-		wrap.querySelector(".rr-lock")?.remove();
-		wrap.classList.remove(...FILL);
-	}
-
-	function fillState(chance, required) {
-		if (chance >= required) return "green";
-		if (chance >= required - AMBER_BAND) return "amber";
-		return "red";
-	}
 
 	function renderStatusIcon(s, onCompleted) {
 		let icon = s.wrap.querySelector(".rr-stat");
@@ -1558,7 +1411,7 @@
 	}
 
 	function applyTooltipStatus(tip) {
-		if (!TornApi.members) return;
+		if (!tip.isConnected || !Gate.pass() || !TornApi.members) return;
 		const wrap = slotWrapOf(tooltipTrigger(tip));
 		if (!wrap) return;
 		const xid = wrap
@@ -1573,14 +1426,14 @@
 		const textEl = [...top.children].find((c) => c !== iconDiv) || top;
 		if (textEl.textContent === text) return; // idempotent — icon set alongside, avoids a loop
 		// overwrite Torn's planning row with our status icon + text
-		textEl.textContent = text;
-		if (iconDiv && STATUS_ICON[st.state]) iconDiv.innerHTML = STATUS_ICON[st.state];
+		editNativeContents(textEl, () => { textEl.textContent = text; });
+		if (iconDiv && STATUS_ICON[st.state]) editNativeContents(iconDiv, () => { iconDiv.innerHTML = STATUS_ICON[st.state]; });
 	}
 
 	// Tooltip is React-managed and re-renders (e.g. live planning %); reapplying inside the observer callback runs pre-paint, so there's no flicker.
 	function augmentTooltip(tip) {
-		if (tip.__rrObs) return;
 		const apply = () => safe("tooltip", () => applyTooltipStatus(tip));
+		if (tip.__rrObs) { apply(); return; }
 		tip.__rrObs = new MutationObserver(apply);
 		apply();
 		tip.__rrObs.observe(tip, {
@@ -1591,52 +1444,21 @@
 	}
 
 	// ============================== SLOT STATE ==============================
-	function renderSlotState(info, tab) {
-		const {
-			key,
-			slots,
-			ocId
-		} = info;
-		const onRecruiting = tab === "Recruiting";
-		const onPlanning = tab === "Planning";
-		const onCompleted = tab === "Completed";
-		for (const s of slots) {
-			clearSlot(s.wrap);
+	function renderSlotState(info, decision, tab) {
+		info.slots.forEach((s, i) => {
+			const d = decision.slots[i];
 			s.header.classList.add("rr-role");
-			s.header.classList.toggle(
-				"rr-item-missing",
-				!!s.xid && !!FactionCrimes.missingItem(ocId, s.roleNorm),
-			);
-			if (!onRecruiting && !onPlanning && !onCompleted) continue;
-			renderStatusIcon(s, onCompleted);
-			if (s.chance == null) continue;
-			const required = requiredFor(key, s.roleNorm);
-
-			if (onRecruiting && !s.xid) {
-				if (required == null) {
-					s.wrap.classList.add("rr-fill-grey");
-				} else {
-					const state = fillState(s.chance, required);
-					s.wrap.classList.add("rr-fill-" + state);
-					if (state === "red") {
-						relative(s.wrap);
-						s.wrap.appendChild(
-							el(
-								"div",
-								"rr-lock",
-								`<span>Not Eligible: Requires: ${required}+</span>`,
-							),
-						);
-					}
-				}
-			} else {
-				s.wrap.classList.add(
-					required == null ?
-					"rr-fill-grey" :
-					"rr-fill-" + fillState(s.chance, required),
-				);
-			}
-		}
+			s.header.classList.toggle("rr-item-missing", d.itemMissing);
+			renderStatusIcon(s, tab === "Completed");
+			for (const fill of FILL) s.wrap.classList.toggle(fill, fill === "rr-fill-" + d.fill);
+			let lock = s.wrap.querySelector(".rr-lock");
+			if (d.locked) {
+				relative(s.wrap);
+				const html = `<span>Not Eligible: Requires: ${d.required}+</span>`;
+				if (!lock) s.wrap.appendChild(el("div", "rr-lock", html));
+				else if (lock.innerHTML !== html) lock.innerHTML = html;
+			} else lock?.remove();
+		});
 	}
 
 	// #endregion
@@ -1664,9 +1486,17 @@
 	];
 
 	async function applyApiKey(value) {
-		await saveApiKey(value);
-		Gate.reset();
-		Config.load();
+		if (apiKeyChanging) throw new Error("API key change already in progress");
+		apiKeyChanging = true;
+		try {
+			Gate.reset();
+			onGateChange();
+			await secureDelete(SESSION_STORAGE);
+			await saveApiKey(value);
+			Config.load();
+		} finally {
+			apiKeyChanging = false;
+		}
 		onGateChange();
 		void Gate.refresh();
 	}
@@ -1681,14 +1511,9 @@
 		button.disabled = true;
 		setStatus("Validating…", "wait");
 		try {
-			const response = await requestRaw({
-				method: "POST",
-				url: AUTH_API + "/v1/session",
-				body: { apiKey: key, app: "oc-autopilot", clientVersion: VERSION },
-			});
-			if (response.status === 200) setStatus("Valid and authorized", "ok");
-			else if (response.status === 401) setStatus("Invalid or unavailable key", "bad");
-			else if (response.status === 403) setStatus("Access restricted", "bad");
+			await Gate.refresh();
+			if (Gate.pass()) setStatus("Valid and authorized", "ok");
+			else if (Gate.state === "denied") setStatus("Access restricted", "bad");
 			else setStatus("Authorization unavailable", "wait");
 		} catch (e) {
 			setStatus("Connection error", "bad");
@@ -1904,7 +1729,7 @@
 				bar.querySelector(".rr-sort").addEventListener("change", (e) => {
 					this.state.sort = e.target.value;
 					storeSet("rr_oc_sort", this.state.sort);
-					applyVisibility();
+					scheduleRender();
 				});
 			}
 			const gear = bar.querySelector(".rr-gear");
@@ -1921,29 +1746,21 @@
 	function applyVisibility() {
 		const panels = qa(document, "div[data-oc-id]");
 		const list = listContainer();
-		const st = Toolbar.state;
-		if (list) {
-			const sorting = st.sort !== "default";
-			list.style.display = sorting ? "flex" : "";
-			list.style.flexDirection = sorting ? "column" : "";
+		const sorting = Toolbar.state.sort !== "default";
+		if (list) { list.style.display = sorting ? "flex" : ""; list.style.flexDirection = sorting ? "column" : ""; }
+		for (const panel of panels) {
+			if (sorting && panel.getAttribute("aria-busy") === "true") continue;
+			const i = Analysis.result?.order.indexOf(panel.getAttribute("data-oc-id")) ?? -1;
+			panel.style.order = sorting && i >= 0 ? String(i) : "";
 		}
-		const metric = {
-			"success-desc": (p) =>
-				p.dataset.rrSuccess ? -p.dataset.rrSuccess : Infinity,
-			"success-asc": (p) =>
-				p.dataset.rrSuccess ? +p.dataset.rrSuccess : Infinity,
-			"level-desc": (p) => -(+p.dataset.rrLevel || 0),
-			"level-asc": (p) => +p.dataset.rrLevel || 0,
-		} [st.sort];
-		if (metric) {
-			[...panels]
-			.sort((a, b) => metric(a) - metric(b))
-				.forEach((p, i) => (p.style.order = i));
-		} else panels.forEach((p) => (p.style.order = ""));
 		const countEl = document.querySelector(".rr-count");
-		if (countEl && document.querySelector(".rr-toolbar")?.dataset.mode === "full") {
-			const joinable = panels.filter((p) => +p.dataset.rrJoinable > 0).length;
-			const txt = `${panels.length} OCs${joinable ? ` · ${joinable} joinable` : ""}`;
+		if (countEl && !Analysis.result) {
+			const text = Analysis.nextTryAt > Date.now() ? "Analysis unavailable; retrying..." : "Loading decisions...";
+			if (countEl.textContent !== text) countEl.textContent = text;
+		}
+		if (countEl && Analysis.result) {
+			const n = Analysis.result.joinable;
+			const txt = Analysis.error ? "Decision refresh unavailable; retrying..." : `${panels.length} OCs${n ? ` · ${n} joinable` : ""}`;
 			if (countEl.textContent !== txt) countEl.textContent = txt;
 		}
 	}
@@ -1953,45 +1770,115 @@
 	// #region Panel Processing
 
 	// ============================ PER-PANEL PROCESSING ============================
-	function processPanel(panel, tab) {
-		if (!Gate.pass()) return; // faction gate — no UI is injected for outsiders
-		const info = safe("parse", () => parsePanel(panel));
-		if (!info || !info.key || !info.slots.length) return;
-		// Content-based fingerprint (not fetch timestamps) so an unchanged API refresh doesn't force a full DOM rewrite — this is what stops the mobile status-icon flashing.
-		const fp = [
-			info.key,
-			tab,
-			Config.at,
-			info.slots
-			.map((s) => {
-				const st = s.xid ? TornApi.statusFor(s.xid) : null;
-				const miss = FactionCrimes.missingItem(info.ocId, s.roleNorm) ?
-					1 :
-					0;
-				return `${s.roleNorm}:${s.chance}:${s.xid}:${st ? st.state : ""}:${miss}`;
-			})
-			.join("|"),
-		].join("§");
-		if (panel.dataset.rrFp === fp) return;
-		panel.dataset.rrFp = fp;
-
-		for (const s of info.slots) {
-			safe("checkpoint", () => renderCheckpoint(s));
-			safe("meta", () => renderMeta(s, info.key));
-		}
-		safe("info", () => renderInfoRow(info, tab));
-		safe("slot-state", () => renderSlotState(info, tab));
-
-		safe("dataset", () => {
-			panel.dataset.rrLevel = info.level || "";
-			panel.dataset.rrOpen = info.slots.filter((s) => !s.xid).length;
-			panel.dataset.rrJoinable = info.slots.filter((s) => {
-				if (s.xid || s.chance == null) return false;
-				const req = requiredFor(info.key, s.roleNorm);
-				return req == null || s.chance >= req - AMBER_BAND;
-			}).length;
-		});
+	function panelInput(info) {
+		const crime = FactionCrimes.byId?.[info.ocId];
+		return { ocId: info.ocId, title: info.title, slug: info.slug, level: info.level,
+			crime: crime ? { status: crime.status, slots: (crime.slots || []).map(s => ({ position: s.position, item_requirement: s.item_requirement })) } : null,
+			hasCrimes: FactionCrimes.byId !== null,
+			slots: info.slots.map(s => ({ role: s.role, chance: s.chance, xid: s.xid || null,
+				domFailed: !!s.wrap.closest(sel("failed")), glyph: s.xid && !s.wrap.querySelector(sel("planning")) ? s.wrap.querySelector(sel("slotIcon"))?.innerHTML || "" : "" })) };
 	}
+
+	const Analysis = {
+		fingerprint: null, result: null, pending: null, nextTryAt: 0, error: false,
+		context: null, observations: new Map(),
+		reset() { this.fingerprint = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false; this.context = null; this.observations.clear(); },
+		contextFor(input) { return JSON.stringify([location.href, input.tab, input.config, input.roles]); },
+		input(infos, tab) {
+			const panels = infos.map(panelInput);
+			const input = { tab, sort: Toolbar.state.sort, config: Config.data, roles: Success.roles, probabilities: {}, panels };
+			if (this.context === this.contextFor(input)) {
+				for (const panel of panels) {
+					if (this.observations.get(panel.ocId) !== JSON.stringify(panel)) continue;
+					const key = this.result?.panels.find(p => p.ocId === panel.ocId)?.probability?.key;
+					if (key && Success.cache.has(key)) input.probabilities[key] = Success.cache.get(key);
+				}
+			}
+			return input;
+		},
+		reconcile(infos, input) {
+			if (!this.result) return;
+			const sameContext = this.context === this.contextFor(input);
+			const keep = new Set();
+			input.panels.forEach((panel, i) => {
+				if (sameContext && this.observations.get(panel.ocId) === JSON.stringify(panel)) keep.add(panel.ocId);
+				else {
+					const before = this.observations.get(panel.ocId);
+					const requirements = p => JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]);
+					clearPanelDecision(infos[i].panel, sameContext && !!before && requirements(JSON.parse(before)) === requirements(panel));
+				}
+			});
+			const panels = this.result.panels.filter(p => keep.has(p.ocId));
+			if (panels.length !== this.result.panels.length) {
+				this.result = panels.length ? { ...this.result, panels, order: this.result.order.filter(id => keep.has(id)), joinable: null } : null;
+				this.fingerprint = null;
+			}
+		},
+		async ensure(infos, tab) {
+			if (!Gate.pass()) return;
+			const input = this.input(infos, tab);
+			const fp = JSON.stringify(input);
+			this.reconcile(infos, input);
+			if (this.result && fp === this.fingerprint) { this.draw(infos, tab); return; }
+			if (this.pending || Date.now() < this.nextTryAt) return;
+			const gen = Gate.gen;
+			const token = Gate.token;
+			const page = location.href;
+			const job = {};
+			this.pending = job;
+			try {
+				const result = await requestJson({ method: "POST", url: AUTH_API + "/v1/oc/analyse", headers: { Authorization: `Bearer ${token}` }, body: input });
+				if (gen !== Gate.gen || !Gate.pass() || page !== location.href) return;
+				const current = qa(document, "div[data-oc-id]").map(parsePanel);
+				if (JSON.stringify(this.input(current, activeTab())) !== fp) return;
+				this.fingerprint = fp; this.result = result; this.error = false; this.nextTryAt = 0;
+				this.context = this.contextFor(input);
+				this.observations = new Map(input.panels.map(p => [p.ocId, JSON.stringify(p)]));
+				this.draw(current, tab);
+			} catch (error) {
+				if (gen !== Gate.gen || page !== location.href) return;
+				if ((error.status === 401 || error.status === 403) && token !== Gate.token) return;
+				this.nextTryAt = Date.now() + Math.max(RETRY_MS, error.retryAfter || 0);
+				this.fingerprint = null; this.error = true;
+				if (error.status === 401 || error.status === 403) {
+					await denyProtected(error.status, gen, token);
+				} else {
+					const current = qa(document, "div[data-oc-id]").map(parsePanel);
+					this.reconcile(current, this.input(current, activeTab()));
+					for (const info of current) {
+						const pill = info.panel.getAttribute("aria-busy") === "true" && info.panel.querySelector(".rr-success");
+						if (pill && pill.textContent !== "Success: unavailable") pill.textContent = "Success: unavailable";
+					}
+					this.draw(current, activeTab());
+					log("analysis unavailable", error); setTimeout(scheduleRender, this.nextTryAt - Date.now());
+				}
+			} finally {
+				if (this.pending === job) { this.pending = null; if (gen === Gate.gen) scheduleRender(); }
+			}
+		},
+		draw(infos, tab) {
+			if (!this.result || !Gate.pass()) return;
+			if (!document.body.classList.contains("rr-oc-authorized")) document.body.classList.add("rr-oc-authorized");
+			for (const info of infos) {
+				const decision = this.result.panels.find(p => p.ocId === info.ocId);
+				if (!decision || decision.slots.length !== info.slots.length) continue;
+				info.panel.removeAttribute("aria-busy");
+				const fp = JSON.stringify([decision, this.error, info.slots.map(s => s.xid && TornApi.statusFor(s.xid))]);
+				const present = info.slots.every((s, i) => {
+					const d = decision.slots[i];
+					return s.header.classList.contains("rr-role") && s.wrap.querySelector(".rr-meta") &&
+						s.header.classList.contains("rr-item-missing") === Boolean(d.itemMissing) &&
+						Boolean(s.wrap.querySelector(".rr-lock")) === Boolean(d.locked) &&
+						FILL.every(fill => s.wrap.classList.contains(fill) === (fill === "rr-fill-" + d.fill));
+				}) && (!decision.probability || info.panel.querySelector(".rr-info .rr-success"));
+				if (info.panel.dataset.rrFp === fp && present) continue;
+				info.panel.dataset.rrFp = fp;
+				info.slots.forEach((s, i) => { renderCheckpoint(s); renderMeta(s, decision.slots[i]); });
+				renderInfoRow(info, decision); renderSlotState(info, decision, tab);
+			}
+			applyVisibility();
+		},
+	};
 
 	// #endregion
 
@@ -2017,9 +1904,8 @@
 		for (const [ocId, rec] of panelNodes) {
 			if (!live.has(ocId) && !rec.info?.isConnected) panelNodes.delete(ocId);
 		}
-		for (const p of panels) {
-			safe("panel", () => processPanel(p, tab));
-		}
+		Success.ensureRoles();
+		void Analysis.ensure(panels.map(parsePanel), tab);
 		safe("toolbar", () => Toolbar.ensure(tab));
 		safe("visibility", applyVisibility);
 		safe("torn-api", () => TornApi.refresh());
@@ -2027,7 +1913,7 @@
 	}
 
 	function tickLive() {
-		if (document.hidden || !Gate.pass()) return;
+		if (document.hidden || !Gate.pass() || !Analysis.result) return;
 		const tab = safe("tab", activeTab, null);
 		if (tab !== "Planning" && tab !== "Recruiting" && tab !== "Completed") {
 			return;
@@ -2055,24 +1941,10 @@
 		}, RENDER_DEBOUNCE_MS);
 	}
 
-	let visScheduled = false;
+	// Cached server results can restore remounted panels without another request.
 
-	function scheduleVisibility() {
-		if (visScheduled) return;
-		visScheduled = true;
-		setTimeout(() => {
-			visScheduled = false;
-			safe("visibility", applyVisibility);
-		}, VIS_DEBOUNCE_MS);
-	}
-
-	// Restores any panel that lost its injected UI (remount or class wipe) synchronously, before the browser paints — this is the mobile flash fix.
 	function syncPanels() {
-		if (!Gate.pass()) return;
-		const tab = safe("tab", activeTab, null);
-		for (const panel of qa(document, "div[data-oc-id]")) {
-			if (!panel.dataset.rrFp) safe("panel", () => processPanel(panel, tab));
-		}
+		if (Gate.pass()) scheduleRender();
 	}
 
 	safe("init", () => {
@@ -2108,6 +1980,9 @@
 		});
 		new MutationObserver((muts) => {
 			for (const mut of muts) {
+				for (const n of mut.removedNodes) {
+					if (n instanceof Element && !n.isConnected) restoreNativeEdits(n);
+				}
 				for (const n of mut.addedNodes) {
 					const tip = tooltipNode(n);
 					if (tip) safe("tooltip", () => augmentTooltip(tip));

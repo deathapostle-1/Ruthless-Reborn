@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.4
+// @version      4.1.5
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -43,6 +43,7 @@
     const STORAGE_TYPE = 'torn-attack-type';
     const STORAGE_KEY = 'torn-attack-api-key';              // Legacy localStorage key, migration only
     const SECURE_STORAGE_KEY = 'torn-attack-api-key-v2';
+    const SESSION_STORAGE_KEY = 'rr-attack-session-v1';
     const STORAGE_JWT = 'torn-attack-jwt';                  // Legacy cache, removed on startup
     const STORAGE_WAR = 'torn-attack-war';                  // {ourFaction, oppId, roster, at}
     const STORAGE_LIMITS = 'torn-attack-limits';            // {payload, at}
@@ -60,7 +61,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.3';                                // keep in step with @version above
+    const VERSION = '4.1.5';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -69,9 +70,8 @@
     const AUTH_REFRESH_MS = 4 * 60 * 1000;
     const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 
-    const ZZCRAFT_USERAGENT = 'rr-attack-userscript/4.1.4'  // User agent used on zzcraft
+    const ZZCRAFT_USERAGENT = 'rr-attack-userscript/' + VERSION;  // User agent used on zzcraft
 
-    const TTL_FACTION = 24 * 60 * 60 * 1000;                // our own faction id barely changes
     const TTL_WAR = 5 * 60 * 1000;                          // war state
     const TTL_ROSTER = 10 * 60 * 1000;                      // enemy roster
     const POLL_MIN = 10 * 1000;                             // guard against a bad/missing nextUpdate
@@ -113,51 +113,11 @@
         [ATTACK.MUG]: 'Mug',
         [ATTACK.HOSP]: 'Hosp'
     };
-
-    // Outcome button label per attack type - matched on text, never position
-    // (the button count varies by fight state).
-    const OUTCOME = {
-        [ATTACK.LEAVE]: 'leave',
-        [ATTACK.MUG]: 'mug',
-        [ATTACK.HOSP]: 'hospitalize'
-    };
-    const OUTCOME_LABELS = Object.values(OUTCOME);
-
-    // Helmet (lowercased) -> temporary weapons it nullifies completely. Smoke
-    // Grenade is deliberately absent (blocked by nothing); Sand became a
-    // Material in 2025 and lost its immunity.
-    const TEMP_IMMUNITY = {
-        'delta gas mask': ['nerve gas', 'tear gas', 'pepper spray'],
-        'vanguard respirator': ['nerve gas', 'tear gas', 'pepper spray'],
-        'hazmat suit': ['nerve gas', 'tear gas', 'pepper spray'],
-        'eod helmet': ['concussion grenade', 'pepper spray'],
-        'welding helmet': ['flash grenade', 'pepper spray'],
-        'motorcycle helmet': ['pepper spray'],
-        'riot helmet': ['pepper spray'],
-        'marauder face mask': ['pepper spray']
-    };
-
-    // Opponent weapon bonuses worth acting on. Matched on the title attribute,
-    // never the class (Torn ships class "bonus-attachment-evicerate" for title
-    // "Eviscerate"); exact titles also keep cosmetic mods out.
-    //   side 'own'     -> chip + a tag on one of YOUR slots; bad choice against them
-    //   side 'own-all' -> one chip; tags on your Primary/Secondary/Melee slots
-    const BONUS_ADVICE = {
-        'parry': { side: 'own', slot: 'weapon_melee', level: 'avoid', label: 'Parry' },
-        'home run': { side: 'own', slot: 'weapon_temp', level: 'caution', label: 'Home Run' },
-        'disarm': { side: 'own-all', level: 'caution', label: 'Disarm' }
-    };
-
-    // The bonus-capable weapon slot ids (same ids on both sides). Fists and
-    // boots cannot carry bonuses.
-    const WEAPON_SLOT_IDS = new Set(['weapon_main', 'weapon_second', 'weapon_melee', 'weapon_temp']);
-
-    // Disarm threatens held weapons; a thrown temporary cannot be disarmed.
-    const DISARM_SLOTS = ['weapon_main', 'weapon_second', 'weapon_melee'];
-
-    // Fail open: only a button positively identified as the pre-fight start
-    // control is ever blocked; anything unrecognised is left completely alone.
+    const OUTCOME_LABELS = ['leave', 'mug', 'hospitalize'];
     const START_LABELS = ['start fight', 'start', 'fight', 'attack'];
+
+    // DOM slot identifiers, not advice rules.
+    const WEAPON_SLOT_IDS = new Set(['weapon_main', 'weapon_second', 'weapon_melee', 'weapon_temp']);
 
     // #endregion
 
@@ -290,7 +250,7 @@
     let slot = Number(storeGet(STORAGE_SLOT));
     if (!SLOT_NAMES[slot]) slot = SLOT.MELEE;               // corrupt storage must never pick a ghost slot
     let attackType = Number(storeGet(STORAGE_TYPE));
-    if (!OUTCOME[attackType]) attackType = ATTACK.MUG;      // ...or hide every outcome button
+    if (!ATTACK_NAMES[attackType]) attackType = ATTACK.MUG;      // ...or hide every outcome button
 
     const settings = { ...SETTINGS_DEFAULTS, ...(jsonGet(STORAGE_SETTINGS) || {}) };
 
@@ -826,50 +786,24 @@
     // Attack buttons
 
     function filterOutcomeButtons() {
-        const box = q(document, sel('dialogButtons'));
-        if (!box) return;
-
-        const buttons = qa(box, 'button');
-        if (!settings.outcome) {
-            buttons.forEach(b => delAttr(b, 'data-txm-hide'));
-            return;
-        }
-
-        const isOutcome = (b) => OUTCOME_LABELS.includes(b.textContent.trim().toLowerCase());
-
-        // Fail open: only ever hide a button positively identified as an unwanted
-        // outcome. START FIGHT / CONTINUE states are left completely alone.
-        if (!buttons.some(isOutcome)) return;
-
-        const want = OUTCOME[attackType];
+        const buttons = qa(q(document, sel('dialogButtons')), 'button');
+        const selected = OUTCOME_LABELS[attackType - 1];
         buttons.forEach(b => {
-            const text = b.textContent.trim().toLowerCase();
-            if (isOutcome(b) && text !== want) setAttr(b, 'data-txm-hide', '');
+            const label = b.textContent.trim().toLowerCase();
+            if (Session.pass() && settings.outcome && selected && OUTCOME_LABELS.includes(label) && label !== selected) setAttr(b, 'data-txm-hide', '');
             else delAttr(b, 'data-txm-hide');
         });
     }
 
-    // Tag the dialog with which state it is in, so CSS can hide the emptied
-    // frame once the buttons are repositioned out of it (both layouts). Check
-    // order matters: START_LABELS holds generic words, so it goes last.
-    // Unknown labels -> attribute removed -> nothing hidden (fail open).
     function classifyDialog() {
         const box = q(document, sel('dialogButtons'));
         const wrap = box && box.closest(sel('dialogWrapper'));
-        if (!wrap) {
-            // A wrapper that lost its buttons mid-remount must never stay
-            // visibility-hidden with nothing left to re-show.
-            qa(document, `${sel('dialogWrapper')}[data-txm-dialog]`)
-                .forEach(el => delAttr(el, 'data-txm-dialog'));
-            return;
-        }
-
+        qa(document, sel('dialogWrapper') + '[data-txm-dialog]').forEach(el => {
+            if (el !== wrap) delAttr(el, 'data-txm-dialog');
+        });
         const labels = qa(box, 'button').map(b => b.textContent.trim().toLowerCase());
-        let state = '';
-        if (labels.some(t => OUTCOME_LABELS.includes(t))) state = 'outcome';
-        else if (labels.includes('continue')) state = 'continue';   // inert in CSS - kept as a state marker
-        else if (labels.some(t => START_LABELS.includes(t))) state = 'start';
-
+        const state = Session.pass() && (labels.some(t => OUTCOME_LABELS.includes(t)) ? 'outcome'
+            : labels.includes('continue') ? 'continue' : labels.some(t => START_LABELS.includes(t)) ? 'start' : '');
         if (state) setAttr(wrap, 'data-txm-dialog', state);
         else delAttr(wrap, 'data-txm-dialog');
     }
@@ -934,16 +868,6 @@
         return { el, empty: false, name: weaponName(el) };
     }
 
-    // The rolled value only ever appears in the description prose. Percent
-    // first - Motivation-style text carries a trailing "(x5)" that must not win.
-    function bonusValue(desc) {
-        let m = /(\d+(?:\.\d+)?)\s*%/.exec(desc);
-        if (m) return m[1] + '%';
-        m = /(\d+(?:\.\d+)?)\s*turns?\b/i.exec(desc);
-        if (m) return m[1] + (m[1] === '1' ? ' turn' : ' turns');
-        return '';
-    }
-
     function readDefenderBonuses(defSlots) {
         // Desktop-layout data only: mobile never mounts defender weapon slots,
         // so this read stays 'unknown' there.
@@ -960,26 +884,12 @@
             // Stat icons have no title attribute and blanks an empty one - both drop out.
             qa(el, 'i[data-bonus-attachment-title]').forEach(i => {
                 const title = (i.getAttribute('data-bonus-attachment-title') || '').trim();
-                const advice = title && BONUS_ADVICE[title.toLowerCase()];
-                if (!advice) return;                         // mods and everything else
+                if (!title) return;
                 const desc = (i.getAttribute('data-bonus-attachment-description') || '').trim();
-                out.push({ advice, value: bonusValue(desc), desc });   // plain data only - element refs go stale
+                out.push({ title, desc });   // plain data only - element refs go stale
             });
         });
         return { state: 'known', bonuses: out };
-    }
-
-    function helmetVerdict(tempName) {
-        const read = readHelmet();
-        if (read.state === 'known') lastHelmet = read.helmet;
-        else if (read.state === 'bare') lastHelmet = '';
-        // 'unknown' keeps whatever was already read on this page - the map is
-        // torn down when the fight ends
-
-        if (lastHelmet === null) return 'unknown';
-
-        const blocks = TEMP_IMMUNITY[lastHelmet.toLowerCase()] || [];
-        return blocks.includes(tempName.toLowerCase()) ? 'blocked' : 'ok';
     }
 
     // Write-on-change only: the body observer filters attributes to ['class'],
@@ -1067,73 +977,19 @@
         setShown(q(bar, '.txm-fa-info'), any);
     }
 
-    const LEVEL_ORDER = { avoid: 0, caution: 1, unknown: 2, ok: 3 };
-
     function renderAdvice() {
         const { own, def } = weaponSlotBuckets();
-
-        if (!settings.advisor) {                             // toggled off: clear every mark, hide the row
-            Object.values(own).forEach(el => { tagSlot(el, null); tagDisarm(el, false); });
-            def.forEach(el => tagSlot(el, null));
-            renderAdviceRow([]);
-            return;
-        }
-
-        const read = readDefenderBonuses(def);
-        if (read.state === 'known') lastBonuses = read.bonuses;
-        // 'unknown' keeps the last good read, for the same reason as lastHelmet
-
-        const mine = {};                                     // your slot id -> {level, tag}
-        let disarm = null;                                   // one shared warning
-        const chips = [];
-
-        (lastBonuses || []).forEach(b => {
-            const text = b.advice.label + (b.value ? ' ' + b.value : '');
-            if (b.advice.side === 'own') {
-                mine[b.advice.slot] = { level: b.advice.level, tag: b.advice.label.toLowerCase() };
-                chips.push({ level: b.advice.level, text, desc: b.desc });
-            } else if (b.advice.side === 'own-all') {        // keep the worst roll when both weapons carry it
-                if (!disarm || (parseFloat(b.value) || 0) > (parseFloat(disarm.value) || 0)) {
-                    disarm = { level: b.advice.level, value: b.value, text, desc: b.desc };
-                }
-            }
+        const advice = settings.advisor && Analysis.display('advice')?.advice;
+        Object.entries(own).forEach(([id, el]) => {
+            const tag = advice && advice.tags[id];
+            tagSlot(el, tag && tag.level, tag && tag.tag);
+            tagDisarm(el, !!(advice && advice.disarmSlots.includes(id)));
+            delAttr(el, 'data-txm-temp');
+            delAttr(el, 'data-txm-helmet');
         });
-        if (disarm) chips.push({ level: disarm.level, text: disarm.text, desc: disarm.desc });
-
-        // Temporary: no slot mark (user preference) - the verdict lives in the
-        // bar chip. Helmet immunity wins over Home Run: a blocked throw is a
-        // certainty, a deflected one only a chance.
-        const temp = readOwnTemp(own.weapon_temp);
-        if (temp) {                                          // self-heal marks older versions wrote
-            tagSlot(temp.el, null);
-            delAttr(temp.el, 'data-txm-temp');
-            delAttr(temp.el, 'data-txm-helmet');
-        }
-        if (temp && !temp.empty && temp.name) {
-            const verdict = helmetVerdict(temp.name);
-            const hr = mine.weapon_temp;
-            chips.push(verdict === 'blocked'
-                ? { level: 'avoid', text: `${temp.name} blocked by ${lastHelmet}` }
-                : verdict === 'ok'
-                    ? (hr ? { level: hr.level, text: `${temp.name} may be deflected` }
-                          : { level: 'ok', text: `${temp.name} effective` })
-                    : { level: 'unknown', text: `${temp.name} unknown` });
-        }
-
-        // Melee: tagged only when they carry Parry. Never a green all-clear, so
-        // an unmarked slot means "no Parry seen", not "verified safe".
-        const melee = mine.weapon_melee;
-        tagSlot(own.weapon_melee, melee && melee.level, melee && melee.tag);
-
-        // Disarm lives on their weapon but disables whichever held weapon YOU
-        // use, so its tags go on the holdable slots - equipped or not.
-        DISARM_SLOTS.forEach(id => tagDisarm(own[id], !!disarm));
-
-        // Defender slots never carry marks - sweep stale paint.
         def.forEach(el => tagSlot(el, null));
-
-        chips.sort((a, b) => (LEVEL_ORDER[a.level] ?? 9) - (LEVEL_ORDER[b.level] ?? 9));
-        renderAdviceRow(chips);
+        // Request failures are reported once in the shared warning row.
+        renderAdviceRow(advice ? advice.chips : []);
     }
 
     // Top bar
@@ -1251,7 +1107,7 @@
         q(bar, '#torn-attack-select').addEventListener('change', e => {
             attackType = Number(e.target.value) || ATTACK.MUG;
             storeSet(STORAGE_TYPE, String(attackType));
-            filterOutcomeButtons();
+            schedule();
         });
 
         // Proxy, never move: reparenting a React-managed node breaks its unmount
@@ -1412,7 +1268,9 @@
         startAt: 0,                                         // ms; ranked war start time
         inFlight: false,
         retryAt: 0,
-        gen: 0                                              // bumped on key change; stale responses are discarded
+        gen: 0,                                             // bumped on key change; stale responses are discarded
+        ranked: null,
+        rosterId: null
     };
 
     const Limits = {
@@ -1425,109 +1283,107 @@
         gen: 0
     };
 
+    function retryDelay(response) {
+        const headers = response && response.headers;
+        let value = null;
+        if (typeof headers === 'string') value = /^retry-after:\s*(.+)$/im.exec(headers)?.[1]?.trim();
+        else if (headers && typeof headers === 'object') {
+            const key = Object.keys(headers).find(k => k.toLowerCase() === 'retry-after');
+            if (key) value = String(headers[key]);
+        }
+        if (!value) return RETRY_NET;
+        const seconds = Number(value);
+        const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+        return Number.isFinite(delay) ? Math.max(1000, delay) : RETRY_NET;
+    }
+
+    async function keyFingerprint(key) {
+        const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
+        return Array.from(new Uint8Array(bytes), b => b.toString(16).padStart(2, '0')).join('');
+    }
+
     const Session = {
-        state: 'unknown',                                  // unknown | ok | denied
-        token: null,
-        expiresAt: 0,
-        nextTryAt: 0,
-        inFlight: false,
-        gen: 0,
-        refreshTimer: null,
-        pass() {
-            return this.state === 'ok' && !!this.token && Date.now() < this.expiresAt;
-        },
+        state: 'unknown', token: null, expiresAt: 0, renewAt: 0, factionId: null,
+        nextTryAt: 0, inFlight: false, gen: 0, refreshTimer: null,
+        pass() { return this.state === 'ok' && !!this.token && Date.now() < this.expiresAt; },
         reset() {
             this.gen++;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
             this.refreshTimer = null;
             this.inFlight = false;
-            this.state = 'unknown';
-            this.token = null;
-            this.expiresAt = 0;
-            this.nextTryAt = 0;
+            this.state = 'unknown'; this.token = null; this.expiresAt = 0; this.renewAt = 0;
+            this.nextTryAt = 0; this.factionId = null;
+        },
+        accept(data) {
+            this.token = data.token; this.expiresAt = data.expiresAt; this.renewAt = data.renewAt;
+            this.factionId = data.factionId; playerId = data.playerId;
+            this.state = 'ok'; this.nextTryAt = 0;
+            this.scheduleRefresh(); onSessionChange();
         },
         scheduleRefresh() {
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
-            const remaining = this.expiresAt - Date.now() - AUTH_EXPIRY_SKEW_MS;
-            const delay = Math.max(1000, Math.min(AUTH_REFRESH_MS, remaining));
-            this.refreshTimer = setTimeout(() => {
-                void this.refresh(true);
-            }, delay);
+            this.refreshTimer = setTimeout(() => void this.refresh(), Math.max(1000, this.renewAt - Date.now()));
         },
-        deferRetry() {
-            const remaining = this.expiresAt - Date.now() - AUTH_EXPIRY_SKEW_MS;
-            const stillValid = !!this.token && remaining > 0;
-            if (!stillValid) {
-                this.token = null;
-                this.expiresAt = 0;
-            }
-            this.state = stillValid ? 'ok' : 'unknown';
-            const delay = stillValid ? Math.max(1000, Math.min(30000, remaining)) : RETRY_NET;
+        deferRetry(response) {
+            if (!this.pass()) { this.token = null; this.expiresAt = 0; this.state = 'unknown'; }
+            const delay = retryDelay(response);
             this.nextTryAt = Date.now() + delay;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
-            this.refreshTimer = setTimeout(() => {
-                this.nextTryAt = 0;
-                void this.refresh(true);
-            }, delay);
+            this.refreshTimer = setTimeout(() => void this.refresh(), delay);
             onSessionChange();
         },
-        async refresh(force = false) {
+        async refresh() {
             const key = apiKey();
             if (!validKey(key)) {
-                if (this.state !== 'denied' || this.token) {
-                    this.reset();
-                    this.state = 'denied';
-                    onSessionChange();
-                }
+                if (this.state !== 'denied' || this.token) { this.reset(); this.state = 'denied'; onSessionChange(); }
                 return;
             }
-            if (!force && this.pass() && Date.now() < this.expiresAt - AUTH_EXPIRY_SKEW_MS) return;
+            if (this.pass() && Date.now() < this.renewAt) return;
             if (this.inFlight || Date.now() < this.nextTryAt) return;
-
             const gen = this.gen;
             this.inFlight = true;
-            try {
-                const response = await crossOriginFetch(
-                    AUTH_API,
-                    'POST',
-                    '/v1/session',
-                    { 'Content-Type': 'application/json' },
-                    JSON.stringify({ apiKey: key, app: 'attack-advisor', clientVersion: VERSION })
-                );
-                if (gen !== this.gen) return;
-
+            const run = async () => {
+                const keyHash = await keyFingerprint(key);
+                if (gen !== this.gen || key !== apiKey()) return;
+                const savedText = await secureGet(SESSION_STORAGE_KEY);
+                let saved = null;
+                try { saved = typeof savedText === 'string' ? JSON.parse(savedText) : null; } catch (_) { /* invalid record is not a session */ }
+                if (gen !== this.gen || key !== apiKey()) return;
+                if (saved && saved.keyHash === keyHash && saved.version === VERSION &&
+                    typeof saved.token === 'string' && saved.token.length > 0 && saved.token.length <= 8192 &&
+                    Number.isFinite(saved.expiresAt) && saved.expiresAt > Date.now() + AUTH_EXPIRY_SKEW_MS &&
+                    saved.expiresAt <= Date.now() + 5 * 60 * 1000 &&
+                    Number.isFinite(saved.renewAt) && saved.renewAt > Date.now() && saved.renewAt < saved.expiresAt &&
+                    Number.isSafeInteger(saved.playerId) && saved.playerId > 0 && Number.isSafeInteger(saved.factionId) && saved.factionId > 0) {
+                    this.accept(saved); return;
+                }
+                const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/session',
+                    { 'Content-Type': 'application/json' }, JSON.stringify({ apiKey: key, app: 'attack-advisor', clientVersion: VERSION }));
+                if (gen !== this.gen || key !== apiKey()) return;
                 if (response.status === 200) {
-                    const data = JSON.parse(response.text);
-                    const expiresAt = Number(data.expiresAt) * 1000;
-                    if (typeof data.token !== 'string' ||
-                        !Number.isFinite(expiresAt) ||
-                        expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS) {
-                        throw new Error('invalid authorization response');
-                    }
-                    this.token = data.token;
-                    this.expiresAt = expiresAt;
-                    this.state = 'ok';
-                    this.nextTryAt = 0;
-                    this.scheduleRefresh();
-                    onSessionChange();
-                    return;
-                }
-
-                if (response.status === 401 || response.status === 403) {
-                    this.token = null;
-                    this.expiresAt = 0;
-                    this.state = 'denied';
-                    this.nextTryAt = Date.now() + RETRY_NET;
-                    onSessionChange();
-                } else {
-                    this.deferRetry();
-                }
-            } catch (e) {
-                if (gen !== this.gen) return;
-                this.deferRetry();
-            } finally {
-                if (gen === this.gen) this.inFlight = false;
-            }
+                    const data = JSON.parse(response.text), expiresAt = Number(data.expiresAt) * 1000;
+                    if (typeof data.token !== 'string' || !data.token || data.token.length > 8192 ||
+                        !Number.isFinite(expiresAt) || expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS || expiresAt > Date.now() + 5 * 60 * 1000 ||
+                        !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) throw new Error('Invalid authorization response');
+                    const record = { token: data.token, expiresAt, renewAt: Math.min(Date.now() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
+                        playerId: data.playerId, factionId: data.factionId, keyHash, version: VERSION };
+                    await secureSet(SESSION_STORAGE_KEY, JSON.stringify(record));
+                    if (gen !== this.gen || key !== apiKey()) return;
+                    this.accept(record);
+                } else if (response.status === 401 || response.status === 403) {
+                    await secureDelete(SESSION_STORAGE_KEY);
+                    if (gen !== this.gen || key !== apiKey()) return;
+                    this.token = null; this.expiresAt = 0; this.state = 'denied';
+                    this.nextTryAt = Date.now() + retryDelay(response); onSessionChange();
+                } else this.deferRetry(response);
+            };
+            try {
+                // Web Locks serialize renewals between tabs. PDA without this browser API
+                // still reuses protected storage and coalesces within this script instance.
+                if (typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request('rr-attack-session', run);
+                else await run();
+            } catch (_) { if (gen === this.gen && key === apiKey()) this.deferRetry(); }
+            finally { if (gen === this.gen) this.inFlight = false; }
         }
     };
 
@@ -1559,7 +1415,7 @@
                 );
                 if (gen !== this.gen || !Session.pass()) return null;
                 if (!response.ok) {
-                    this.nextTryAt = Date.now() + RETRY_NET;
+                    this.nextTryAt = Date.now() + retryDelay(response);
                     return null;
                 }
 
@@ -1582,7 +1438,85 @@
         }
     };
 
-    const warHits = (me) => me.nbWarHits == null ? 0 : me.nbWarHits;
+    function analysisInput() {
+        const { own, def } = weaponSlotBuckets();
+        const helmet = readHelmet();
+        if (helmet.state === 'known') lastHelmet = helmet.helmet;
+        else if (helmet.state === 'bare') lastHelmet = '';
+        const bonuses = readDefenderBonuses(def);
+        if (bonuses.state === 'known') lastBonuses = bonuses.bonuses;
+        const temp = readOwnTemp(own.weapon_temp);
+        return {
+            helmet: lastHelmet, bonuses: lastBonuses || [],
+            temp: temp ? { empty: temp.empty, name: temp.name || null } : null,
+            // Required by the deployed API; outcome presentation is now entirely local.
+            labels: [], attackType: 1, defenderId: defenderId() ? Number(defenderId()) : null,
+            war: { state: War.state, ranked: War.ranked, factionId: Session.factionId,
+                roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster) } : null },
+            limits: Limits.payload ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member } : null
+        };
+    }
+
+    const Analysis = {
+        result: null, signature: '', observed: '', pending: false, gen: 0, nextTryAt: 0, expiresAt: 0, block: null,
+        reset() { this.gen++; this.result = null; this.signature = ''; this.observed = ''; this.pending = false; this.nextTryAt = 0; this.expiresAt = 0; this.block = null; },
+        current() { return Session.pass() && !!this.result && this.signature === this.observed && Date.now() < this.expiresAt; },
+        // Retain presentation during a request only when its relevant observations
+        // still match. Permission and data acquisition continue to use current().
+        display(section) {
+            if (!Session.pass() || !this.result) return null;
+            if (this.current()) return this.result;
+            if (!this.pending || !this.signature) return null;
+            const before = JSON.parse(this.signature), now = analysisInput();
+            const context = input => section === 'limits' ? [input.defenderId, input.war] :
+                [input.defenderId, input.helmet, input.bonuses, input.temp];
+            return JSON.stringify(context(before)) === JSON.stringify(context(now)) ? this.result : null;
+        },
+        blocked() {
+            if (!this.block) return false;
+            const input = analysisInput();
+            if (!Session.pass() || this.block.sessionGen !== Session.gen || this.block.search !== location.search ||
+                Date.now() >= this.block.until || this.block.context !== JSON.stringify([input.defenderId, input.war])) {
+                this.block = null;
+                return false;
+            }
+            return true;
+        },
+        async refresh() {
+            if (!Session.pass()) return;
+            const input = analysisInput(), signature = JSON.stringify(input);
+            this.observed = signature;
+            if (this.current() || this.pending || Date.now() < this.nextTryAt) return;
+            const gen = this.gen, sessionGen = Session.gen, token = Session.token, search = location.search;
+            this.pending = true;
+            schedule();
+            try {
+                const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/attack/analyse',
+                    { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, signature);
+                if (gen !== this.gen || sessionGen !== Session.gen || token !== Session.token || search !== location.search || !Session.pass()) return;
+                if (response.status === 401 || response.status === 403) {
+                    Session.reset(); Session.state = response.status === 403 ? 'denied' : 'unknown';
+                    Session.nextTryAt = Date.now() + retryDelay(response);
+                    await secureDelete(SESSION_STORAGE_KEY); onSessionChange();
+                    return;
+                }
+                if (!response.ok) { this.result = null; this.nextTryAt = Date.now() + retryDelay(response); return; }
+                if (signature !== JSON.stringify(analysisInput())) return;
+                const result = JSON.parse(response.text);
+                if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt)) throw new Error('Invalid analysis response');
+                this.result = result; this.signature = signature;
+                this.expiresAt = Math.min(result.revalidateAt, Session.expiresAt);
+                this.nextTryAt = 0;
+                // A known prohibition survives equipment/advice renewal for this same war target.
+                // A new decision replaces it; navigation, authorization and war changes invalidate it.
+                this.block = result.limits.blocked ? { sessionGen, search,
+                    context: JSON.stringify([input.defenderId, input.war]),
+                    until: result.limits.pending ? result.war.startAt : Infinity } : null;
+                War.oppId = result.war.oppId; War.oppName = result.war.oppName; War.startAt = result.war.startAt;
+            } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = Date.now() + RETRY_NET; } }
+            finally { if (gen === this.gen) { this.pending = false; schedule(); } }
+        }
+    };
 
     function apiKey() {
         return authApiKey;
@@ -1607,21 +1541,9 @@
         return defenderCache.id;
     }
 
-    // Derived on demand so the page flips pending -> war by itself at start time.
-    function warPhase() {
-        if (War.state !== 'war') return War.state;
-        return (War.startAt && Date.now() < War.startAt) ? 'pending' : 'war';
-    }
-
-    // null unless the defender is on the enemy roster of a declared or running
-    // ranked war. Everything war-related keys off this.
     function warTarget() {
-        const phase = warPhase();
-        if (phase !== 'war' && phase !== 'pending') return null;
-        if (!War.roster) return null;
-        const def = defenderId();
-        if (!def || !War.roster.has(Number(def))) return null;
-        return { oppId: War.oppId, pending: phase === 'pending' };
+        const war = Analysis.current() && Analysis.result.war;
+        return war && war.target ? { oppId: war.oppId, pending: war.phase === 'pending' } : null;
     }
 
     // "Saturday, 8th August at 20:00" in the viewer's local time zone.
@@ -1665,90 +1587,77 @@
         return { data: body };
     }
 
-    // Restore the last known war context synchronously, before any fetch, so
-    // the first paint of a new attack page is already correct. Only fresh
-    // records are trusted - a stale cache with a dead API would otherwise show
-    // (and block on) a war that ended long ago. Stale -> idle, loadWar refetches.
-    function hydrateWar() {
+    function readWarCache() {
         const rec = jsonGet(STORAGE_WAR);
-        if (!Session.pass() || !rec || !fresh(rec.war, TTL_WAR)) return;
-        if (!rec.war.ranked) { War.state = 'nowar'; return; }
-        if (rec.roster && rec.roster.ids && fresh(rec.roster, TTL_ROSTER)) {
-            War.oppId = rec.roster.oppId;
-            const opp = (rec.war.ranked.factions || []).find(f => f.id === War.oppId);
-            War.oppName = (opp && opp.name) || null;
-            War.roster = new Set(rec.roster.ids);
-            War.startAt = (rec.war.ranked.start || 0) * 1000;
-            War.state = 'war';                              // warPhase() decides war vs pending
+        if (rec === null) return null;
+        const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
+        const id = value => Number.isSafeInteger(value) && value > 0;
+        const timestamp = value => Number.isFinite(value) && value > 0 && value <= Date.now();
+        const ranked = rec && rec.war && rec.war.ranked;
+        if (!object(rec) || !id(rec.factionId) || !object(rec.war) || !timestamp(rec.war.at) ||
+            !(ranked === null || (object(ranked) && Number.isFinite(ranked.start) && ranked.start >= 0 &&
+                Array.isArray(ranked.factions) && ranked.factions.length === 2 &&
+                ranked.factions.every(f => object(f) && id(f.id) && typeof f.name === 'string' && f.name.length <= 200))) ||
+            !(rec.roster == null || (object(rec.roster) && id(rec.roster.oppId) && timestamp(rec.roster.at) &&
+                Array.isArray(rec.roster.ids) && rec.roster.ids.length <= 500 && rec.roster.ids.every(id)))) {
+            storeDel(STORAGE_WAR);
+            return null;
         }
+        return rec;
+    }
+
+    function applyWarCache(rec) {
+        if (!Session.pass() || !rec || rec.factionId !== Session.factionId || !fresh(rec.war, TTL_WAR)) return;
+        const before = JSON.stringify([War.state, War.ranked, War.rosterId, War.roster && Array.from(War.roster)]);
+        War.ranked = rec.war.ranked;
+        War.state = rec.war.ranked ? 'war' : 'nowar';
+        War.roster = null; War.rosterId = null;
+        if (rec.war.ranked && rec.roster && fresh(rec.roster, TTL_ROSTER)) {
+            War.roster = new Set(rec.roster.ids); War.rosterId = rec.roster.oppId;
+        }
+        const changed = before !== JSON.stringify([War.state, War.ranked, War.rosterId, War.roster && Array.from(War.roster)]);
+        if (changed) schedule();
+        return changed;
+    }
+
+    function hydrateWar() {
+        applyWarCache(readWarCache());
     }
 
     async function loadWar() {
-        if (!Session.pass()) return;
-        if (War.inFlight || Date.now() < War.retryAt) return;
-        if (!validKey(apiKey())) return;
-
-        const rec = jsonGet(STORAGE_WAR) || {};
-        if (fresh(rec.faction, TTL_FACTION) && fresh(rec.war, TTL_WAR) &&
-            (!rec.war.ranked || fresh(rec.roster, TTL_ROSTER))) return;   // everything still fresh
-
-        const gen = War.gen;                                // a key change mid-flight voids this response
+        if (!Session.pass() || War.inFlight || Date.now() < War.retryAt) return;
+        const gen = War.gen, sessionGen = Session.gen;
+        const rec = readWarCache() || {};
+        if (rec.factionId !== Session.factionId) { rec.war = null; rec.roster = null; }
+        rec.factionId = Session.factionId;
         War.inFlight = true;
         try {
-            if (!fresh(rec.faction, TTL_FACTION)) {
-                const r = await tornGet('/faction/basic');
-                if (r.error) throw new Error('faction: ' + r.error);
-                rec.faction = { id: r.data.basic.id, at: Date.now() };
-            }
-
             if (!fresh(rec.war, TTL_WAR)) {
                 const r = await tornGet('/faction/wars');
+                if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
                 if (r.error) throw new Error('wars: ' + r.error);
-                const ranked = (r.data.wars && r.data.wars.ranked) || null;
-                rec.war = { ranked, at: Date.now() };
-                if (!ranked) rec.roster = null;              // war ended - drop the stale roster
-            }
-
-            // ranked === null is Torn stating there is no planned or ongoing
-            // ranked war. That is the authoritative "hide the row" signal.
-            if (!rec.war.ranked) {
-                if (gen !== War.gen) return;
+                const ranked = r.data.wars && r.data.wars.ranked;
+                rec.war = { ranked: ranked ? { start: ranked.start, factions: ranked.factions.map(f => ({ id: f.id, name: f.name })) } : null, at: Date.now() };
+                rec.roster = null;
                 jsonSet(STORAGE_WAR, rec);
-                War.state = 'nowar';
-                War.roster = null;
-                War.oppId = null;
-                War.oppName = null;
-                War.startAt = 0;
-                return;
             }
-
-            const opp = (rec.war.ranked.factions || []).find(f => f.id !== rec.faction.id);
-            if (!opp) throw new Error('opponent not resolvable');
-
-            if (!fresh(rec.roster, TTL_ROSTER) || !rec.roster || rec.roster.oppId !== opp.id) {
-                const r = await tornGet(`/faction/${opp.id}/members`);
+            // A changed observation must reach analysis before its opponent can select a roster.
+            if (applyWarCache(rec) || !rec.war.ranked) return;
+            // The server chooses the opposing faction. The client only transports
+            // the resulting Torn request using this user's key.
+            const oppId = Analysis.current() && Analysis.result.war.oppId;
+            if (oppId && (!fresh(rec.roster, TTL_ROSTER) || rec.roster.oppId !== oppId)) {
+                const r = await tornGet('/faction/' + oppId + '/members');
+                if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
                 if (r.error) throw new Error('members: ' + r.error);
-                rec.roster = {
-                    oppId: opp.id,
-                    ids: (r.data.members || []).map(m => m.id),
-                    at: Date.now()
-                };
+                rec.roster = { oppId, ids: (r.data.members || []).map(m => m.id), at: Date.now() };
+                jsonSet(STORAGE_WAR, rec); applyWarCache(rec);
             }
-
-            if (gen !== War.gen) return;
-            jsonSet(STORAGE_WAR, rec);
-            War.oppId = opp.id;
-            War.oppName = opp.name || null;
-            War.roster = new Set(rec.roster.ids);
-            War.startAt = (rec.war.ranked.start || 0) * 1000;
-            War.state = 'war';                              // warPhase() decides war vs pending
-        } catch (e) {
-            if (gen !== War.gen) return;
-            War.state = War.roster ? 'war' : 'error';        // keep serving the cached roster
-            War.retryAt = Date.now() + RETRY_NET;
-        } finally {
-            War.inFlight = false;
-        }
+        } catch (_) {
+            if (gen !== War.gen || sessionGen !== Session.gen) return;
+            War.state = 'error'; War.ranked = null; War.roster = null; War.rosterId = null;
+            War.retryAt = Date.now() + RETRY_NET; storeDel(STORAGE_WAR); schedule();
+        } finally { if (gen === War.gen) War.inFlight = false; }
     }
 
     // WarRoom limits. TornPDA is a Flutter webview with no GM_* API but its own
@@ -1766,15 +1675,17 @@
     // Normalises all three transports to {ok, status, text}.
     function crossOriginFetch(baseUrl, method, path, headers, body) {
         const url = baseUrl + path;
+        const timeoutMs = baseUrl === AUTH_API ? 25000 : 20000;
 
         if (isPda()) {
             const call = method === 'POST'
                 ? PAGE.flutter_inappwebview.callHandler('PDA_httpPost', url, headers || {}, body || null)
                 : PAGE.flutter_inappwebview.callHandler('PDA_httpGet', url, headers || {});
-            const timeout = new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 20000));
+            let timer;
+            const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), timeoutMs); });
             return Promise.race([Promise.resolve(call), timeout]).then(r => ({
-                ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || ''
-            }));
+                ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || '', headers: r.responseHeaders || r.headers || ''
+            })).finally(() => clearTimeout(timer));
         }
 
         const x = gmx();
@@ -1785,9 +1696,9 @@
                 method, url,
                 headers: headers || {},
                 data: body || null,
-                timeout: 20000,
+                timeout: timeoutMs,
                 onload: r => resolve({
-                    ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || ''
+                    ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || '', headers: r.responseHeaders || r.headers || ''
                 }),
                 onerror: () => reject(new Error('network')),
                 ontimeout: () => reject(new Error('timeout'))
@@ -1804,12 +1715,7 @@
     }
 
     async function ensurePlayerId() {
-        if (playerId) return playerId;
-        const response = await tornGet('/user/profile');
-        const id = response.data && response.data.profile && response.data.profile.id;
-        if (!Number.isSafeInteger(id) || id < 1) return null;
-        playerId = id;
-        return playerId;
+        return Session.pass() ? playerId : null;
     }
 
     function nonNegativeNumberOrNull(value) {
@@ -1888,18 +1794,20 @@
         Limits.inFlight = true;
         try {
             const ownPlayerId = await ensurePlayerId();
+            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
             let token = await WarRoom.ensure();
+            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
             if (!ownPlayerId || !token) throw new Error('WarRoom unavailable');
 
             let res = await fetchWarRoomLimits(token);
             if (res.status === 401) {
+                if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
                 WarRoom.reset();
-                if (gen !== Limits.gen || sessionGen !== Session.gen) return;
                 token = await WarRoom.ensure();
                 if (gen !== Limits.gen || sessionGen !== Session.gen) return;
                 if (token) res = await fetchWarRoomLimits(token);
             }
-            if (gen !== Limits.gen || sessionGen !== Session.gen) return;
+            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
 
             if (res.status === 401 || res.status === 403) {
                 Limits.rejects++;
@@ -1910,7 +1818,10 @@
                 Limits.nextAt = Date.now() + RETRY_NET;
                 return;
             }
-            if (!res.ok) throw new Error('limits ' + res.status);
+            if (!res.ok) {
+                Limits.payload = null; Limits.at = 0; Limits.nextAt = Date.now() + retryDelay(res);
+                return;
+            }
             Limits.rejects = 0;
             Limits.authFailed = false;
 
@@ -1930,55 +1841,8 @@
                 Limits.nextAt = Date.now() + RETRY_NET;
             }
         } finally {
-            Limits.inFlight = false;
+            if (gen === Limits.gen) { Limits.inFlight = false; schedule(); }
         }
-    }
-
-    function myMember() {
-        const p = Limits.payload;
-        return p && p.member ? p.member : null;
-    }
-
-    function rangeText(min, max, dp) {
-        const f = (v) => (dp == null ? String(v) : Number(v).toFixed(dp));
-        if (min != null && max != null) return `${f(min)}-${f(max)}`;
-        if (min != null) return `≥${f(min)}`;
-        if (max != null) return `≤${f(max)}`;
-        return '';
-    }
-
-    // War Helper's rules, kept exactly: null limits and zero-hit averages stay neutral.
-    function complianceOf(me, lim) {
-        const out = { hits: '', avg: '' };
-        if (!me || !lim) return out;
-
-        const hits = warHits(me);
-        const avg = me.averageRespect == null ? 0 : me.averageRespect;
-
-        if (lim.minHits != null && hits < lim.minHits) out.hits = '0';
-        else if (lim.maxHits != null && hits > lim.maxHits) out.hits = '0';
-        else if (lim.minHits != null || lim.maxHits != null) out.hits = '1';
-
-        if (lim.averageRespectGoal != null && hits > 0) {
-            out.avg = avg < lim.averageRespectGoal ? '0' : '1';
-        }
-        return out;
-    }
-
-    // Block AT the cap - the next hit would spend the faction's one-over
-    // tolerance, so waiting until it is taken defeats the point.
-    function overHitState() {
-        const lim = Limits.payload && Limits.payload.currentLimit;
-        const me = myMember();
-        if (!lim || !me) return null;
-        if (lim.noHitsAllowed) return { blocked: true, reason: 'No hits allowed' };
-        if (lim.maxHits == null) return null;
-
-        const hits = warHits(me);
-        if (hits >= lim.maxHits) {
-            return { blocked: true, reason: `At hit cap ${hits}/${lim.maxHits} - next hit exceeds the limit` };
-        }
-        return { blocked: false };
     }
 
     function blockStartFight(on) {
@@ -1987,7 +1851,7 @@
 
         qa(box, 'button').forEach(b => {
             const text = b.textContent.trim().toLowerCase();
-            if (on && START_LABELS.includes(text)) setAttr(b, 'data-txm-block', '');
+            if (on && Session.pass() && START_LABELS.includes(text)) setAttr(b, 'data-txm-block', '');
             else if (b.hasAttribute('data-txm-block')) b.removeAttribute('data-txm-block');
         });
     }
@@ -2004,155 +1868,57 @@
     function renderLimits() {
         const bar = q(document, '.txm-fa-bar');
         if (!bar) return;
-
-        const row = q(bar, '.txm-fa-limits');
-        const warnRow = q(bar, '.txm-fa-warn');
-        const key = apiKey();
-
-        const hideAll = () => {
-            setShown(row, false);
-            setShown(warnRow, false);
-            blockStartFight(false);
-        };
-
-        if (!validKey(key)) { limitsSig = 'nokey'; hideAll(); return; }
-
-        // Async layers - these never block the render.
-        safe('war-load', loadWar);
-
-        const tgt = warTarget();
-
-        // Out of war, or not a war target: nothing to show and nothing to block.
-        if (!tgt) { limitsSig = 'notarget:' + warPhase(); hideAll(); return; }
-
-        // Declared but not started: block outright, and hide the limits figures,
-        // which still describe the PREVIOUS war until this one begins.
-        if (tgt.pending) {
-            setShown(row, false);
-            setShown(warnRow, true);
-            const sig = `pending:${War.oppName || ''}:${War.startAt}`;   // repaints when the name lands
-            if (limitsSig !== sig) {
-                limitsSig = sig;
-                warnRow.textContent = '';
-                const who = War.oppName ? ` with ${War.oppName}` : '';
-                chip(warnRow, '', `The war${who} starts on ${warStartText()}. Start Fight has been disabled until then.`);
+        const row = q(bar, '.txm-fa-limits'), warnRow = q(bar, '.txm-fa-warn');
+        const result = Analysis.display('limits');
+        const view = result && result.limits;
+        const unavailable = !!(view && view.visible && !Limits.payload);
+        const analysisFailed = Analysis.nextTryAt > 0;
+        const signature = JSON.stringify([view, unavailable, Limits.authFailed, Limits.inFlight, analysisFailed]);
+        if (signature !== limitsSig) {
+            limitsSig = signature;
+            setShown(row, !!(view && view.visible && !unavailable));
+            if (view && view.visible && !unavailable) {
+                const layout = JSON.stringify([view.parts.map(p => p[0]), view.stats.map(s => s.label)]);
+                if (row.getAttribute('data-txm-layout') !== layout || !row.children.length) {
+                    row.textContent = '';
+                    setAttr(row, 'data-txm-layout', layout);
+                    chip(row, 'txm-fa-key', 'LIMITS');
+                    if (!view.parts.length) chip(row, 'txm-fa-lim', 'none set');
+                    view.parts.forEach(([label, value], i) => {
+                        if (i) chip(row, 'txm-fa-sep', '·');
+                        const part = chip(row, 'txm-fa-lim', label ? label + ' ' : '');
+                        const bold = document.createElement('b'); bold.textContent = value; part.appendChild(bold);
+                    });
+                    const mine = document.createElement('span'); mine.className = 'txm-fa-mine'; row.appendChild(mine);
+                    view.stats.forEach((stat, i) => {
+                        if (i) chip(mine, 'txm-fa-sep', '·');
+                        chip(mine, 'txm-fa-key', stat.label);
+                        const attrs = {}; if (stat.ok) attrs['data-ok'] = stat.ok; if (stat.cap) attrs['data-cap'] = '1';
+                        chip(mine, 'txm-fa-val', stat.value, attrs);
+                    });
+                    chip(mine, 'txm-fa-age', '');
+                } else {
+                    qa(row, '.txm-fa-lim b').forEach((node, i) => setLiveText(node, view.parts[i][1]));
+                    qa(row, '.txm-fa-val').forEach((node, i) => {
+                        const stat = view.stats[i];
+                        setLiveText(node, stat.value);
+                        if (stat.ok) setAttr(node, 'data-ok', stat.ok); else delAttr(node, 'data-ok');
+                        if (stat.cap) setAttr(node, 'data-cap', '1'); else delAttr(node, 'data-cap');
+                    });
+                }
             }
-            blockStartFight(true);
-            return;
+            let warning = '';
+            if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
+            else if (view.pending) warning = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.';
+            else if (view.visible && Limits.authFailed) warning = 'War limits key rejected. Save your Torn API key in Settings to retry.';
+            else if (unavailable) warning = Limits.inFlight ? '' : 'War limits unavailable. Retrying…';
+            else if (view.reason) warning = 'Warning: ' + view.reason;
+            setShown(warnRow, !!warning); setLiveText(warnRow, warning);
         }
-
-        safe('limits-load', loadLimits);
-
-        const p = Limits.payload;
-        if (Limits.authFailed && !p) {
-            const sig = 'limits-auth-failed';
-            setShown(row, false);
-            setShown(warnRow, true);
-            if (limitsSig !== sig) {
-                limitsSig = sig;
-                warnRow.textContent = '';
-                chip(warnRow, '', 'War limits key rejected. Save or validate your Torn API key in Settings.');
-            }
-            blockStartFight(false);
-            return;
-        }
-        const lim = p && p.currentLimit;
-        const me = myMember();
-        const over = overHitState();
-        const ageS = Limits.at ? Math.round((Date.now() - Limits.at) / 1000) : null;
-        const stale = ageS == null || (Date.now() - Limits.at) > STALE_AFTER;
-
-        // Excludes the age, which ticks every second - the age chip is updated
-        // separately through its existing text node.
-        const sig = JSON.stringify([
-            lim || null,
-            me ? [me.nbWarHits, me.averageRespect, me.nbHitsNotAllowed] : null,
-            over ? over.reason || 'ok' : null
-        ]);
-
-        const tick = () => {
-            const age = q(row, '.txm-fa-age');
-            if (!age) return;
-            setLiveText(age, ageS == null ? 'no data' : `updated ${ageS}s ago`);
-            setAttr(age, 'data-stale', stale ? '1' : '0');
-        };
-
-        if (sig === limitsSig) {
-            tick();
-            blockStartFight(!!(over && over.blocked));
-            return;
-        }
-        limitsSig = sig;
-
-        // Rebuilt wholesale: one childList record per real change.
-        row.textContent = '';
-        setShown(row, true);
-
-        chip(row, 'txm-fa-key', 'LIMITS');
-        if (!lim) {
-            chip(row, 'txm-fa-lim', 'none set');
-        } else {
-            const parts = [];
-            const hits = rangeText(lim.minHits, lim.maxHits, null);
-            if (hits) parts.push(['Number of Hits', hits]);
-            const tot = rangeText(lim.minTotalRespect, lim.maxTotalRespect, 1);
-            if (tot) parts.push(['Total Respect', tot]);
-            if (lim.averageRespectGoal != null) {
-                parts.push(['Average Respect', '≥' + Number(lim.averageRespectGoal).toFixed(2)]);
-            }
-            if (lim.noHitsAllowed) parts.push(['', 'No hits allowed']);
-
-            if (!parts.length) chip(row, 'txm-fa-lim', 'none set');
-            parts.forEach((pr, i) => {
-                if (i) chip(row, 'txm-fa-sep', '·');
-                const s = chip(row, 'txm-fa-lim', pr[0] ? pr[0] + ' ' : '');
-                const b = document.createElement('b');
-                b.textContent = pr[1];
-                s.appendChild(b);
-            });
-        }
-
-        if (me) {
-            const mineRow = document.createElement('span');
-            mineRow.className = 'txm-fa-mine';
-            row.appendChild(mineRow);
-
-            const c = complianceOf(me, lim);
-            chip(mineRow, 'txm-fa-key', 'MY HITS');
-
-            // Amber only once the one-over tolerance hit has been spent; AT
-            // the cap the figure stays green (still compliant).
-            const hitAttrs = c.hits ? { 'data-ok': c.hits } : {};
-            if (lim && lim.maxHits != null && warHits(me) === lim.maxHits + 1) hitAttrs['data-cap'] = '1';
-            chip(mineRow, 'txm-fa-val', String(warHits(me)),
-                Object.keys(hitAttrs).length ? hitAttrs : null);
-            chip(mineRow, 'txm-fa-sep', '·');
-            chip(mineRow, 'txm-fa-key', 'AVG RESPECT');
-            chip(mineRow, 'txm-fa-val', Number(me.averageRespect || 0).toFixed(2),
-                c.avg ? { 'data-ok': c.avg } : null);
-
-            if (lim && lim.noHitsAllowed) {
-                chip(mineRow, 'txm-fa-sep', '·');
-                chip(mineRow, 'txm-fa-key', 'UNAUTHORIZED');
-                chip(mineRow, 'txm-fa-val', String(me.nbHitsNotAllowed || 0),
-                    { 'data-ok': (me.nbHitsNotAllowed || 0) > 0 ? '0' : '1' });
-            }
-
-            // Server-counted figure can be up to a poll behind - keep the lag
-            // visible. Created empty, filled by tick() so it never forces a rebuild.
-            chip(mineRow, 'txm-fa-age', '', { 'data-stale': '0' });
-        }
-
-        tick();
-
-        if (over && over.blocked) {
-            setShown(warnRow, true);
-            warnRow.textContent = '';
-            chip(warnRow, '', 'Warning: ' + over.reason);
-        } else {
-            setShown(warnRow, false);
-        }
-        blockStartFight(!!(over && over.blocked));
+        const age = q(row, '.txm-fa-age');
+        setLiveText(age, Limits.at ? 'updated ' + Math.round((Date.now() - Limits.at) / 1000) + 's ago' : 'no data');
+        setAttr(age, 'data-stale', !Limits.at || Date.now() - Limits.at > STALE_AFTER ? '1' : '0');
+        blockStartFight(Analysis.blocked());
     }
 
     // #endregion
@@ -2162,6 +1928,9 @@
     // Settings panel (structure derived from Smart Stock Vault's settings cog)
 
     async function applyApiKey(v) {
+        Session.reset();
+        Analysis.reset();
+        await secureDelete(SESSION_STORAGE_KEY);
         await saveApiKey(v);
 
         // A new key invalidates everything derived from the old one, including
@@ -2176,6 +1945,8 @@
         Limits.nextAt = 0;
         Limits.gen++;
         War.state = 'idle';
+        War.ranked = null;
+        War.rosterId = null;
         War.roster = null;
         War.oppId = null;
         War.oppName = null;
@@ -2453,6 +2224,7 @@
     let wasAuthorized = false;
 
     function teardownAuthorized() {
+        Analysis.reset();
         const attributes = [
             'data-txm-block', 'data-txm-hide', 'data-txm-warn', 'data-txm-label',
             'data-txm-disarm', 'data-txm-disarm-label', 'data-txm-dialog',
@@ -2472,6 +2244,8 @@
         storeDel(STORAGE_WAR);
 
         War.state = 'idle';
+        War.ranked = null;
+        War.rosterId = null;
         War.oppId = null;
         War.oppName = null;
         War.roster = null;
@@ -2521,13 +2295,18 @@
             lastHelmet = null;
             lastBonuses = null;
             defNameCache = { id: null, name: null };
+            Analysis.reset();
         }
         refreshStyle();                                     // first, so the hide rules exist before the bar lands
         safe('topbar', renderTopBar);
         if (!Session.pass()) {
+            if (wasAuthorized) onSessionChange();
             safe('auth', () => void Session.refresh());
             return;
         }
+        safe('analysis', () => void Analysis.refresh());
+        safe('war-load', () => void loadWar());
+        if (Analysis.current() && Analysis.result.limits.visible) safe('limits-load', () => void loadLimits());
         safe('buttons', filterOutcomeButtons);
         safe('dialog', classifyDialog);
         safe('advice', renderAdvice);
@@ -2582,10 +2361,14 @@
     setInterval(() => {
         if (document.hidden || !apiKeyLoaded) return;
         if (!Session.pass()) {
+            if (wasAuthorized) onSessionChange();
             safe('tick-auth', () => void Session.refresh());
             safe('tick-authbar', renderTopBar);
             return;
         }
+        safe('tick-analysis', () => void Analysis.refresh());
+        safe('tick-war', () => void loadWar());
+        if (Analysis.current() && Analysis.result.limits.visible) safe('tick-limits-load', () => void loadLimits());
         safe('tick', updateBar);
         safe('tick-limits', renderLimits);                  // drives the nextUpdate-paced poll
         safe('tick-inforow', syncInfoRow);
