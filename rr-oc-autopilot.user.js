@@ -1,7 +1,7 @@
 ﻿// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.5
+// @version      2.1.6
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,21 +27,26 @@
 	// #region Configuration
 
 	// ============================== CONSTANTS ==============================
-	const VERSION = "2.1.5";
+	const VERSION = "2.1.6";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
+	// Session timings follow the RR Script Auth server: a session ends five minutes after the
+	// membership check, and the server reuses that check for four minutes, so renewing sooner
+	// would only return a session with the same end time.
+	const AUTH_MAX_TTL_MS = 5 * 60 * 1000;
 	const AUTH_REFRESH_MS = 4 * 60 * 1000;
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
-	const GATE_RETRY_MS = 60 * 1000; // cooldown between failed gate verification attempts
+	const GATE_RETRY_MS = 60 * 1000; // server's failure cooldown and Retry-After
 	const API_KEY_STORAGE = "rr_oc_api_key_v2";
 	const LEGACY_API_KEY_STORAGE = "rr_oc_api_key";
 	const FACTION_COLOURS = {
 		accent: "#029e7a",
 		dark: "#1f1f1f"
 	};
-	const REFRESH_MS = 5 * 60 * 1000; // API refresh cadence
-	const RETRY_MS = 30 * 1000; // shorter retry window after a failed fetch
+	const MEMBERS_REFRESH_MS = 60 * 1000; // server refreshes member status every 60 s
+	const CRIMES_REFRESH_MS = 30 * 1000; // server refreshes crime data every 30 s
+	const RETRY_MS = 30 * 1000; // retry window after a failed fetch; a longer Retry-After wins
 	const RENDER_DEBOUNCE_MS = 120; // renderAll() debounce
 	const PUMP_DELAY_MS = 250; // Success queue pacing between requests
 
@@ -335,7 +340,11 @@
 		},
 		deferRetry(delay = GATE_RETRY_MS) {
 			this.state = this.token && Date.now() < this.expiresAt ? "ok" : "unknown";
-			this.nextTryAt = Date.now() + Math.max(GATE_RETRY_MS, delay);
+			// While the current session still works, try a failed renewal once more before it
+			// runs out; waiting the full cooldown would clear the page first.
+			const renewBy = this.state === "ok" ? this.expiresAt - AUTH_EXPIRY_SKEW_MS - Date.now() : 0;
+			const wait = Math.max(GATE_RETRY_MS, delay);
+			this.nextTryAt = Date.now() + (renewBy > 0 ? Math.min(wait, Math.max(5000, renewBy)) : wait);
 			if (this.refreshTimer) clearTimeout(this.refreshTimer);
 			this.refreshTimer = setTimeout(() => void this.refresh(true), this.nextTryAt - Date.now());
 			onGateChange();
@@ -343,8 +352,8 @@
 		accept(saved) {
 			const now = Date.now();
 			if (!saved || typeof saved.token !== "string" || !saved.token.length || saved.token.length > 4096 ||
-				!Number.isFinite(saved.expiresAt) || saved.expiresAt <= now + AUTH_EXPIRY_SKEW_MS || saved.expiresAt > now + 5 * 60 * 1000 ||
-				!Number.isFinite(saved.renewedAt) || saved.renewedAt > now || saved.renewedAt < now - 5 * 60 * 1000 ||
+				!Number.isFinite(saved.expiresAt) || saved.expiresAt <= now + AUTH_EXPIRY_SKEW_MS || saved.expiresAt > now + AUTH_MAX_TTL_MS ||
+				!Number.isFinite(saved.renewedAt) || saved.renewedAt > now || saved.renewedAt < now - AUTH_MAX_TTL_MS ||
 				!Number.isSafeInteger(saved.playerId) || saved.playerId < 1 || !Number.isSafeInteger(saved.factionId) || saved.factionId < 1) return false;
 			Object.assign(this, { token: saved.token, expiresAt: saved.expiresAt, renewedAt: saved.renewedAt, playerId: saved.playerId, factionId: saved.factionId, state: "ok", nextTryAt: 0 });
 			if (this.expiryTimer) clearTimeout(this.expiryTimer);
@@ -373,11 +382,16 @@
 					const saved = await secureGet(SESSION_STORAGE);
 					if (gen !== this.gen || key !== apiKey()) return;
 					if (saved?.keyFingerprint === fingerprint && (!force || saved.renewedAt + AUTH_REFRESH_MS > Date.now()) && this.accept(saved)) return;
+					const sentAt = Date.now();
 					const response = await requestRaw({ method: "POST", url: AUTH_API + "/v1/session", body: { apiKey: key, app: "oc-autopilot", clientVersion: VERSION } });
 					if (gen !== this.gen || key !== apiKey() || await secureGet(API_KEY_STORAGE) !== key) return;
 					if (response.status === 200) {
 						const data = JSON.parse(response.text);
-						const session = { token: data.token, expiresAt: Number(data.expiresAt) * 1000, renewedAt: Date.now(), playerId: data.playerId, factionId: data.factionId, keyFingerprint: fingerprint };
+						// Time the session by the seconds the server says remain, counted from the request.
+						// Comparing the server's end time with this PC's clock rejected every fresh session
+						// whenever the clock ran even slightly slow.
+						const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : Number(data.expiresAt) * 1000 - sentAt;
+						const session = { token: data.token, expiresAt: sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS), renewedAt: Date.now(), playerId: data.playerId, factionId: data.factionId, keyFingerprint: fingerprint };
 						if (!this.accept(session)) throw new Error("Invalid authorization response");
 						await secureSet(SESSION_STORAGE, session);
 					} else if (response.status === 401 || response.status === 403) {
@@ -528,7 +542,7 @@
 		async refresh() {
 			const key = apiKey();
 			if (!key || !Gate.pass()) return;
-			if (Date.now() - this.fetchedAt < REFRESH_MS) return;
+			if (Date.now() - this.fetchedAt < MEMBERS_REFRESH_MS) return;
 			const gen = Gate.gen;
 			const token = Gate.token;
 			this.fetchedAt = Date.now();
@@ -556,7 +570,7 @@
 					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
 					await denyProtected(e.status, gen, token); return;
 				}
-				this.fetchedAt = Date.now() - REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
+				this.fetchedAt = Date.now() - MEMBERS_REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
 				log("members refresh failed", e);
 			}
 		},
@@ -570,7 +584,7 @@
 		fetchedAt: 0,
 		async refresh() {
 			if (!Gate.pass()) return;
-			if (Date.now() - this.fetchedAt < REFRESH_MS) return;
+			if (Date.now() - this.fetchedAt < CRIMES_REFRESH_MS) return;
 			const gen = Gate.gen;
 			const token = Gate.token;
 			this.fetchedAt = Date.now();
@@ -591,7 +605,7 @@
 					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
 					await denyProtected(e.status, gen, token); return;
 				}
-				this.fetchedAt = Date.now() - REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
+				this.fetchedAt = Date.now() - CRIMES_REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
 				log("crimes refresh failed", e);
 			}
 		},
@@ -1918,6 +1932,9 @@
 		if (tab !== "Planning" && tab !== "Recruiting" && tab !== "Completed") {
 			return;
 		}
+		// Keep member status and crime data on the server's cadence even while Torn's page is still.
+		safe("torn-api", () => TornApi.refresh());
+		safe("faction-crimes", () => FactionCrimes.refresh());
 		const onCompleted = tab === "Completed";
 		for (const header of qa(document, `div[data-oc-id] ${sel("slotHeader")}`)) {
 			const profile = q(header.parentElement, 'a[href*="profiles.php?XID="]');

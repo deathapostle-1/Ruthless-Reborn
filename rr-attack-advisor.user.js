@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.5
+// @version      4.1.6
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -61,12 +61,16 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.5';                                // keep in step with @version above
+    const VERSION = '4.1.6';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
     const AUTH_API = 'https://rr-script-auth.deathapostle1.workers.dev';
     const ZZCRAFT_API = 'https://api.torn.zzcraft.net';
+    // Session timings follow the RR Script Auth server: a session ends five minutes after the
+    // membership check, and the server reuses that check for four minutes, so renewing sooner
+    // would only return a session with the same end time.
+    const AUTH_MAX_TTL_MS = 5 * 60 * 1000;
     const AUTH_REFRESH_MS = 4 * 60 * 1000;
     const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 
@@ -1326,7 +1330,11 @@
         },
         deferRetry(response) {
             if (!this.pass()) { this.token = null; this.expiresAt = 0; this.state = 'unknown'; }
-            const delay = retryDelay(response);
+            // While the current session still works, try a failed renewal once more before it
+            // runs out; waiting the full cooldown would drop authorization first.
+            const renewBy = this.pass() ? this.expiresAt - AUTH_EXPIRY_SKEW_MS - Date.now() : 0;
+            const wait = retryDelay(response);
+            const delay = renewBy > 0 ? Math.min(wait, Math.max(5000, renewBy)) : wait;
             this.nextTryAt = Date.now() + delay;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
             this.refreshTimer = setTimeout(() => void this.refresh(), delay);
@@ -1352,18 +1360,24 @@
                 if (saved && saved.keyHash === keyHash && saved.version === VERSION &&
                     typeof saved.token === 'string' && saved.token.length > 0 && saved.token.length <= 8192 &&
                     Number.isFinite(saved.expiresAt) && saved.expiresAt > Date.now() + AUTH_EXPIRY_SKEW_MS &&
-                    saved.expiresAt <= Date.now() + 5 * 60 * 1000 &&
+                    saved.expiresAt <= Date.now() + AUTH_MAX_TTL_MS &&
                     Number.isFinite(saved.renewAt) && saved.renewAt > Date.now() && saved.renewAt < saved.expiresAt &&
                     Number.isSafeInteger(saved.playerId) && saved.playerId > 0 && Number.isSafeInteger(saved.factionId) && saved.factionId > 0) {
                     this.accept(saved); return;
                 }
+                const sentAt = Date.now();
                 const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/session',
                     { 'Content-Type': 'application/json' }, JSON.stringify({ apiKey: key, app: 'attack-advisor', clientVersion: VERSION }));
                 if (gen !== this.gen || key !== apiKey()) return;
                 if (response.status === 200) {
-                    const data = JSON.parse(response.text), expiresAt = Number(data.expiresAt) * 1000;
+                    // Time the session by the seconds the server says remain, counted from the request.
+                    // Comparing the server's end time with this PC's clock rejected every fresh session
+                    // whenever the clock ran even slightly slow.
+                    const data = JSON.parse(response.text);
+                    const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : Number(data.expiresAt) * 1000 - sentAt;
+                    const expiresAt = sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS);
                     if (typeof data.token !== 'string' || !data.token || data.token.length > 8192 ||
-                        !Number.isFinite(expiresAt) || expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS || expiresAt > Date.now() + 5 * 60 * 1000 ||
+                        !Number.isFinite(expiresAt) || expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS || expiresAt > Date.now() + AUTH_MAX_TTL_MS ||
                         !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) throw new Error('Invalid authorization response');
                     const record = { token: data.token, expiresAt, renewAt: Math.min(Date.now() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
                         playerId: data.playerId, factionId: data.factionId, keyHash, version: VERSION };
