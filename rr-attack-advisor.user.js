@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.6
+// @version      4.1.7
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -61,7 +61,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.6';                                // keep in step with @version above
+    const VERSION = '4.1.7';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -131,6 +131,62 @@
     const sel = (name) => `[class*="${name}___"]`;
     const q = (root, s) => root ? root.querySelector(s) : null;      // a null root must never widen to document
     const qa = (root, s) => root ? Array.from(root.querySelectorAll(s)) : [];
+
+    // The PC clock is used only as a stopwatch, so it does not matter how wrong it is. Times from
+    // other computers are read against the server's clock (ServerTime), or the sending service's
+    // own clock, never against the PC's.
+
+    // Server time, learned from the RR server's replies. Each reply is stamped to the second and
+    // was made between sending and receiving, which bounds server time minus nowMs() to [lo, hi];
+    // later replies narrow that. Until it is known, callers use safe defaults.
+    const ServerTime = {
+        lo: 0, hi: 0, known: false, confirmed: false,
+        observe(stampMs, sentAt, receivedAt) {
+            if (!Number.isFinite(stampMs) || !(receivedAt >= sentAt)) return;
+            const lo = stampMs - receivedAt, hi = stampMs + 999 - sentAt;
+            if (this.known && this.confirmed && lo <= this.hi && hi >= this.lo) {
+                this.lo = Math.max(this.lo, lo);
+                this.hi = Math.min(this.hi, hi);
+            } else Object.assign(this, { lo, hi, known: true });
+            this.confirmed = true;
+        },
+        usable() { nowMs(); return this.known && this.confirmed; },
+        estimate() { return this.usable() ? nowMs() + (this.lo + this.hi) / 2 : null; },
+        // True only once the server clock has certainly passed t.
+        reached(t) { return this.usable() && nowMs() + this.lo >= t; },
+        // The earliest moment, on nowMs(), at which the server clock may reach t.
+        deadline(t) { return this.usable() ? t - this.hi : null; }
+    };
+
+    // Milliseconds on the PC clock, kept running forward if the clock is set back mid-page.
+    const monoNow = typeof performance === 'object' && performance && typeof performance.now === 'function'
+        ? () => performance.now() : () => Date.now();
+    let wallSeen = Date.now(), monoSeen = monoNow(), wallCorrection = 0;
+    function nowMs() {
+        const wall = Date.now(), mono = monoNow(), expected = wallSeen + (mono - monoSeen);
+        if (wall < expected - 1000) {
+            wallCorrection += expected - wall;
+            setTimeout(afterClockSetBack, 0);
+        } else if (wall > expected + 1000) {
+            // Set forward, or the PC slept: re-check server time, and the session straight away.
+            ServerTime.confirmed = false;
+            setTimeout(afterClockSetForward, 0);
+        }
+        wallSeen = wall; monoSeen = mono;
+        return wall + wallCorrection;
+    }
+    // Stored times use the plain PC clock so other tabs and later pages read them the same way.
+    const toStored = t => t - wallCorrection;
+    const fromStored = t => t + wallCorrection;
+
+    function headerValue(headers, name) {
+        if (typeof headers === 'string') return new RegExp(`^${name}:[ \\t]*(.+?)[ \\t]*$`, 'im').exec(headers)?.[1] || null;
+        if (!headers || typeof headers !== 'object') return null;
+        const key = Object.keys(headers).find(k => k.toLowerCase() === name);
+        return key && headers[key] != null ? String(headers[key]) : null;
+    }
+    // A reply's own clock reading, from its Date header.
+    const replyTime = headers => Date.parse(headerValue(headers, 'date') || '');
 
     // #endregion
 
@@ -241,7 +297,7 @@
         try { storeSet(key, JSON.stringify(value)); } catch (e) { /* quota / cycles */ }
     }
 
-    const fresh = (rec, ttl) => !!(rec && rec.at && Date.now() - rec.at < ttl);
+    const fresh = (rec, ttl) => !!(rec && rec.at && nowMs() - fromStored(rec.at) < ttl);
 
     function safe(label, fn) {                              // one broken selector must not kill the rest
         try { return fn(); } catch (e) { console.error('[RR Attack Advisor]', label, e); }
@@ -1141,7 +1197,7 @@
     function authStatusText() {
         if (!validKey(apiKey())) return 'API key required';
         if (Session.state === 'denied') return 'Access restricted';
-        return Session.nextTryAt > Date.now() ? 'Authorization unavailable' : 'Verifying access…';
+        return Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…';
     }
 
     function buildAuthBar(head, mount) {
@@ -1289,16 +1345,24 @@
 
     function retryDelay(response) {
         const headers = response && response.headers;
-        let value = null;
-        if (typeof headers === 'string') value = /^retry-after:\s*(.+)$/im.exec(headers)?.[1]?.trim();
-        else if (headers && typeof headers === 'object') {
-            const key = Object.keys(headers).find(k => k.toLowerCase() === 'retry-after');
-            if (key) value = String(headers[key]);
-        }
+        const value = headerValue(headers, 'retry-after');
         if (!value) return RETRY_NET;
         const seconds = Number(value);
-        const delay = Number.isFinite(seconds) ? seconds * 1000 : Date.parse(value) - Date.now();
+        // A date is measured against the same reply's clock, never this PC's.
+        const stamp = replyTime(headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
+        const delay = Number.isFinite(seconds) ? seconds * 1000 : from == null ? NaN : Date.parse(value) - from;
         return Number.isFinite(delay) ? Math.max(1000, delay) : RETRY_NET;
+    }
+
+    // Records stored before the PC clock was set back carry times from the old setting.
+    function afterClockSetBack() {
+        secureDelete(SESSION_STORAGE_KEY).catch(() => {});
+        storeDel(STORAGE_WAR);
+    }
+
+    // After the clock jumps forward the session may look spent: renew now rather than at the next timer.
+    function afterClockSetForward() {
+        if (apiKeyLoaded) void Session.refresh();
     }
 
     async function keyFingerprint(key) {
@@ -1309,7 +1373,7 @@
     const Session = {
         state: 'unknown', token: null, expiresAt: 0, renewAt: 0, factionId: null,
         nextTryAt: 0, inFlight: false, gen: 0, refreshTimer: null,
-        pass() { return this.state === 'ok' && !!this.token && Date.now() < this.expiresAt; },
+        pass() { return this.state === 'ok' && !!this.token && nowMs() < this.expiresAt; },
         reset() {
             this.gen++;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
@@ -1326,16 +1390,16 @@
         },
         scheduleRefresh() {
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
-            this.refreshTimer = setTimeout(() => void this.refresh(), Math.max(1000, this.renewAt - Date.now()));
+            this.refreshTimer = setTimeout(() => void this.refresh(), Math.max(1000, this.renewAt - nowMs()));
         },
         deferRetry(response) {
             if (!this.pass()) { this.token = null; this.expiresAt = 0; this.state = 'unknown'; }
             // While the current session still works, try a failed renewal once more before it
             // runs out; waiting the full cooldown would drop authorization first.
-            const renewBy = this.pass() ? this.expiresAt - AUTH_EXPIRY_SKEW_MS - Date.now() : 0;
+            const renewBy = this.pass() ? this.expiresAt - AUTH_EXPIRY_SKEW_MS - nowMs() : 0;
             const wait = retryDelay(response);
             const delay = renewBy > 0 ? Math.min(wait, Math.max(5000, renewBy)) : wait;
-            this.nextTryAt = Date.now() + delay;
+            this.nextTryAt = nowMs() + delay;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
             this.refreshTimer = setTimeout(() => void this.refresh(), delay);
             onSessionChange();
@@ -1346,8 +1410,8 @@
                 if (this.state !== 'denied' || this.token) { this.reset(); this.state = 'denied'; onSessionChange(); }
                 return;
             }
-            if (this.pass() && Date.now() < this.renewAt) return;
-            if (this.inFlight || Date.now() < this.nextTryAt) return;
+            if (this.pass() && nowMs() < this.renewAt) return;
+            if (this.inFlight || nowMs() < this.nextTryAt) return;
             const gen = this.gen;
             this.inFlight = true;
             const run = async () => {
@@ -1357,15 +1421,16 @@
                 let saved = null;
                 try { saved = typeof savedText === 'string' ? JSON.parse(savedText) : null; } catch (_) { /* invalid record is not a session */ }
                 if (gen !== this.gen || key !== apiKey()) return;
+                if (saved && typeof saved === 'object') saved = { ...saved, expiresAt: fromStored(saved.expiresAt), renewAt: fromStored(saved.renewAt) };
                 if (saved && saved.keyHash === keyHash && saved.version === VERSION &&
                     typeof saved.token === 'string' && saved.token.length > 0 && saved.token.length <= 8192 &&
-                    Number.isFinite(saved.expiresAt) && saved.expiresAt > Date.now() + AUTH_EXPIRY_SKEW_MS &&
-                    saved.expiresAt <= Date.now() + AUTH_MAX_TTL_MS &&
-                    Number.isFinite(saved.renewAt) && saved.renewAt > Date.now() && saved.renewAt < saved.expiresAt &&
+                    Number.isFinite(saved.expiresAt) && saved.expiresAt > nowMs() + AUTH_EXPIRY_SKEW_MS &&
+                    saved.expiresAt <= nowMs() + AUTH_MAX_TTL_MS &&
+                    Number.isFinite(saved.renewAt) && saved.renewAt > nowMs() && saved.renewAt < saved.expiresAt &&
                     Number.isSafeInteger(saved.playerId) && saved.playerId > 0 && Number.isSafeInteger(saved.factionId) && saved.factionId > 0) {
                     this.accept(saved); return;
                 }
-                const sentAt = Date.now();
+                const sentAt = nowMs();
                 const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/session',
                     { 'Content-Type': 'application/json' }, JSON.stringify({ apiKey: key, app: 'attack-advisor', clientVersion: VERSION }));
                 if (gen !== this.gen || key !== apiKey()) return;
@@ -1374,21 +1439,24 @@
                     // Comparing the server's end time with this PC's clock rejected every fresh session
                     // whenever the clock ran even slightly slow.
                     const data = JSON.parse(response.text);
-                    const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : Number(data.expiresAt) * 1000 - sentAt;
+                    // The server's current second is expiresAt - expiresIn.
+                    if (Number.isFinite(data.expiresAt) && Number.isFinite(data.expiresIn)) ServerTime.observe((data.expiresAt - data.expiresIn) * 1000, response.sentAt, response.receivedAt);
+                    const serverNow = ServerTime.estimate();
+                    const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : serverNow == null ? NaN : Number(data.expiresAt) * 1000 - serverNow;
                     const expiresAt = sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS);
                     if (typeof data.token !== 'string' || !data.token || data.token.length > 8192 ||
-                        !Number.isFinite(expiresAt) || expiresAt <= Date.now() + AUTH_EXPIRY_SKEW_MS || expiresAt > Date.now() + AUTH_MAX_TTL_MS ||
+                        !Number.isFinite(expiresAt) || expiresAt <= nowMs() + AUTH_EXPIRY_SKEW_MS || expiresAt > nowMs() + AUTH_MAX_TTL_MS ||
                         !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) throw new Error('Invalid authorization response');
-                    const record = { token: data.token, expiresAt, renewAt: Math.min(Date.now() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
+                    const record = { token: data.token, expiresAt, renewAt: Math.min(nowMs() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
                         playerId: data.playerId, factionId: data.factionId, keyHash, version: VERSION };
-                    await secureSet(SESSION_STORAGE_KEY, JSON.stringify(record));
+                    await secureSet(SESSION_STORAGE_KEY, JSON.stringify({ ...record, expiresAt: toStored(record.expiresAt), renewAt: toStored(record.renewAt) }));
                     if (gen !== this.gen || key !== apiKey()) return;
                     this.accept(record);
                 } else if (response.status === 401 || response.status === 403) {
                     await secureDelete(SESSION_STORAGE_KEY);
                     if (gen !== this.gen || key !== apiKey()) return;
                     this.token = null; this.expiresAt = 0; this.state = 'denied';
-                    this.nextTryAt = Date.now() + retryDelay(response); onSessionChange();
+                    this.nextTryAt = nowMs() + retryDelay(response); onSessionChange();
                 } else this.deferRetry(response);
             };
             try {
@@ -1415,7 +1483,7 @@
         async ensure() {
             if (!Session.pass() || !validKey(apiKey())) return null;
             if (this.token) return this.token;
-            if (this.inFlight || Date.now() < this.nextTryAt) return null;
+            if (this.inFlight || nowMs() < this.nextTryAt) return null;
 
             const gen = this.gen;
             this.inFlight = true;
@@ -1429,7 +1497,7 @@
                 );
                 if (gen !== this.gen || !Session.pass()) return null;
                 if (!response.ok) {
-                    this.nextTryAt = Date.now() + retryDelay(response);
+                    this.nextTryAt = nowMs() + retryDelay(response);
                     return null;
                 }
 
@@ -1444,7 +1512,7 @@
                 this.nextTryAt = 0;
                 return this.token;
             } catch (e) {
-                if (gen === this.gen) this.nextTryAt = Date.now() + RETRY_NET;
+                if (gen === this.gen) this.nextTryAt = nowMs() + RETRY_NET;
                 return null;
             } finally {
                 if (gen === this.gen) this.inFlight = false;
@@ -1474,7 +1542,7 @@
     const Analysis = {
         result: null, signature: '', observed: '', pending: false, gen: 0, nextTryAt: 0, expiresAt: 0, block: null,
         reset() { this.gen++; this.result = null; this.signature = ''; this.observed = ''; this.pending = false; this.nextTryAt = 0; this.expiresAt = 0; this.block = null; },
-        current() { return Session.pass() && !!this.result && this.signature === this.observed && Date.now() < this.expiresAt; },
+        current() { return Session.pass() && !!this.result && this.signature === this.observed && nowMs() < this.expiresAt; },
         // Retain presentation during a request only when its relevant observations
         // still match. Permission and data acquisition continue to use current().
         display(section) {
@@ -1489,8 +1557,10 @@
         blocked() {
             if (!this.block) return false;
             const input = analysisInput();
+            // until is the war's start in server time: lift the block only once the server clock has
+            // certainly passed it, never on this PC's clock.
             if (!Session.pass() || this.block.sessionGen !== Session.gen || this.block.search !== location.search ||
-                Date.now() >= this.block.until || this.block.context !== JSON.stringify([input.defenderId, input.war])) {
+                ServerTime.reached(this.block.until) || this.block.context !== JSON.stringify([input.defenderId, input.war])) {
                 this.block = null;
                 return false;
             }
@@ -1500,7 +1570,7 @@
             if (!Session.pass()) return;
             const input = analysisInput(), signature = JSON.stringify(input);
             this.observed = signature;
-            if (this.current() || this.pending || Date.now() < this.nextTryAt) return;
+            if (this.current() || this.pending || nowMs() < this.nextTryAt) return;
             const gen = this.gen, sessionGen = Session.gen, token = Session.token, search = location.search;
             this.pending = true;
             schedule();
@@ -1510,16 +1580,19 @@
                 if (gen !== this.gen || sessionGen !== Session.gen || token !== Session.token || search !== location.search || !Session.pass()) return;
                 if (response.status === 401 || response.status === 403) {
                     Session.reset(); Session.state = response.status === 403 ? 'denied' : 'unknown';
-                    Session.nextTryAt = Date.now() + retryDelay(response);
+                    Session.nextTryAt = nowMs() + retryDelay(response);
                     await secureDelete(SESSION_STORAGE_KEY); onSessionChange();
                     return;
                 }
-                if (!response.ok) { this.result = null; this.nextTryAt = Date.now() + retryDelay(response); return; }
+                if (!response.ok) { this.result = null; this.nextTryAt = nowMs() + retryDelay(response); return; }
                 if (signature !== JSON.stringify(analysisInput())) return;
                 const result = JSON.parse(response.text);
                 if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt)) throw new Error('Invalid analysis response');
                 this.result = result; this.signature = signature;
-                this.expiresAt = Math.min(result.revalidateAt, Session.expiresAt);
+                // revalidateAt is server time: keep this decision until the server clock may reach it,
+                // or for 10 s while server time is not yet known.
+                const revalidate = ServerTime.deadline(result.revalidateAt);
+                this.expiresAt = Math.min(Math.max(nowMs() + 1000, revalidate ?? nowMs() + 10000), Session.expiresAt);
                 this.nextTryAt = 0;
                 // A known prohibition survives equipment/advice renewal for this same war target.
                 // A new decision replaces it; navigation, authorization and war changes invalidate it.
@@ -1527,7 +1600,7 @@
                     context: JSON.stringify([input.defenderId, input.war]),
                     until: result.limits.pending ? result.war.startAt : Infinity } : null;
                 War.oppId = result.war.oppId; War.oppName = result.war.oppName; War.startAt = result.war.startAt;
-            } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = Date.now() + RETRY_NET; } }
+            } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = nowMs() + RETRY_NET; } }
             finally { if (gen === this.gen) { this.pending = false; schedule(); } }
         }
     };
@@ -1606,7 +1679,7 @@
         if (rec === null) return null;
         const object = value => !!value && typeof value === 'object' && !Array.isArray(value);
         const id = value => Number.isSafeInteger(value) && value > 0;
-        const timestamp = value => Number.isFinite(value) && value > 0 && value <= Date.now();
+        const timestamp = value => Number.isFinite(value) && value > 0 && fromStored(value) <= nowMs();
         const ranked = rec && rec.war && rec.war.ranked;
         if (!object(rec) || !id(rec.factionId) || !object(rec.war) || !timestamp(rec.war.at) ||
             !(ranked === null || (object(ranked) && Number.isFinite(ranked.start) && ranked.start >= 0 &&
@@ -1639,7 +1712,7 @@
     }
 
     async function loadWar() {
-        if (!Session.pass() || War.inFlight || Date.now() < War.retryAt) return;
+        if (!Session.pass() || War.inFlight || nowMs() < War.retryAt) return;
         const gen = War.gen, sessionGen = Session.gen;
         const rec = readWarCache() || {};
         if (rec.factionId !== Session.factionId) { rec.war = null; rec.roster = null; }
@@ -1651,7 +1724,7 @@
                 if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
                 if (r.error) throw new Error('wars: ' + r.error);
                 const ranked = r.data.wars && r.data.wars.ranked;
-                rec.war = { ranked: ranked ? { start: ranked.start, factions: ranked.factions.map(f => ({ id: f.id, name: f.name })) } : null, at: Date.now() };
+                rec.war = { ranked: ranked ? { start: ranked.start, factions: ranked.factions.map(f => ({ id: f.id, name: f.name })) } : null, at: toStored(nowMs()) };
                 rec.roster = null;
                 jsonSet(STORAGE_WAR, rec);
             }
@@ -1664,13 +1737,13 @@
                 const r = await tornGet('/faction/' + oppId + '/members');
                 if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
                 if (r.error) throw new Error('members: ' + r.error);
-                rec.roster = { oppId, ids: (r.data.members || []).map(m => m.id), at: Date.now() };
+                rec.roster = { oppId, ids: (r.data.members || []).map(m => m.id), at: toStored(nowMs()) };
                 jsonSet(STORAGE_WAR, rec); applyWarCache(rec);
             }
         } catch (_) {
             if (gen !== War.gen || sessionGen !== Session.gen) return;
             War.state = 'error'; War.ranked = null; War.roster = null; War.rosterId = null;
-            War.retryAt = Date.now() + RETRY_NET; storeDel(STORAGE_WAR); schedule();
+            War.retryAt = nowMs() + RETRY_NET; storeDel(STORAGE_WAR); schedule();
         } finally { if (gen === War.gen) War.inFlight = false; }
     }
 
@@ -1690,6 +1763,15 @@
     function crossOriginFetch(baseUrl, method, path, headers, body) {
         const url = baseUrl + path;
         const timeoutMs = baseUrl === AUTH_API ? 25000 : 20000;
+        const sentAt = nowMs();
+        const reply = r => {
+            const response = {
+                ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || '', headers: r.responseHeaders || r.headers || '',
+                sentAt, receivedAt: nowMs()
+            };
+            if (baseUrl === AUTH_API) ServerTime.observe(replyTime(response.headers), sentAt, response.receivedAt);
+            return response;
+        };
 
         if (isPda()) {
             const call = method === 'POST'
@@ -1697,9 +1779,7 @@
                 : PAGE.flutter_inappwebview.callHandler('PDA_httpGet', url, headers || {});
             let timer;
             const timeout = new Promise((_, rej) => { timer = setTimeout(() => rej(new Error('timeout')), timeoutMs); });
-            return Promise.race([Promise.resolve(call), timeout]).then(r => ({
-                ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || '', headers: r.responseHeaders || r.headers || ''
-            })).finally(() => clearTimeout(timer));
+            return Promise.race([Promise.resolve(call), timeout]).then(reply).finally(() => clearTimeout(timer));
         }
 
         const x = gmx();
@@ -1711,9 +1791,7 @@
                 headers: headers || {},
                 data: body || null,
                 timeout: timeoutMs,
-                onload: r => resolve({
-                    ok: r.status >= 200 && r.status < 300, status: r.status, text: r.responseText || '', headers: r.responseHeaders || r.headers || ''
-                }),
+                onload: r => resolve(reply(r)),
                 onerror: () => reject(new Error('network')),
                 ontimeout: () => reject(new Error('timeout'))
             });
@@ -1801,7 +1879,7 @@
     async function loadLimits() {
         if (!Session.pass()) return;
         if (Limits.inFlight || Limits.authFailed) return;
-        if (Date.now() < Limits.nextAt) return;
+        if (nowMs() < Limits.nextAt) return;
 
         const gen = Limits.gen;                             // a key change mid-flight voids this response
         const sessionGen = Session.gen;
@@ -1829,11 +1907,11 @@
                 WarRoom.reset();
                 Limits.payload = null;
                 Limits.at = 0;
-                Limits.nextAt = Date.now() + RETRY_NET;
+                Limits.nextAt = nowMs() + RETRY_NET;
                 return;
             }
             if (!res.ok) {
-                Limits.payload = null; Limits.at = 0; Limits.nextAt = Date.now() + retryDelay(res);
+                Limits.payload = null; Limits.at = 0; Limits.nextAt = nowMs() + retryDelay(res);
                 return;
             }
             Limits.rejects = 0;
@@ -1842,17 +1920,19 @@
             const payload = sanitizeLimitsPayload(JSON.parse(res.text), ownPlayerId);
             if (!payload) throw new Error('invalid limits response');
             Limits.payload = payload;
-            Limits.at = Date.now();
+            Limits.at = nowMs();
 
-            // Honour the service's own nextUpdate, clamped so a bad value cannot spin us.
+            // Honour the service's own nextUpdate, clamped so a bad value cannot spin us. It is
+            // ZZCraft's time, so measure the wait with ZZCraft's clock from the same reply.
             const nx = payload && payload.nextUpdate && Date.parse(payload.nextUpdate);
-            const wait = nx ? nx - Date.now() : POLL_MIN;
-            Limits.nextAt = Date.now() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait));
+            const stamp = replyTime(res.headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
+            const wait = nx && from != null ? nx - from : POLL_MIN;
+            Limits.nextAt = nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait));
         } catch (e) {
             if (gen === Limits.gen) {
                 Limits.payload = null;
                 Limits.at = 0;
-                Limits.nextAt = Date.now() + RETRY_NET;
+                Limits.nextAt = nowMs() + RETRY_NET;
             }
         } finally {
             if (gen === Limits.gen) { Limits.inFlight = false; schedule(); }
@@ -1930,8 +2010,8 @@
             setShown(warnRow, !!warning); setLiveText(warnRow, warning);
         }
         const age = q(row, '.txm-fa-age');
-        setLiveText(age, Limits.at ? 'updated ' + Math.round((Date.now() - Limits.at) / 1000) + 's ago' : 'no data');
-        setAttr(age, 'data-stale', !Limits.at || Date.now() - Limits.at > STALE_AFTER ? '1' : '0');
+        setLiveText(age, Limits.at ? 'updated ' + Math.round((nowMs() - Limits.at) / 1000) + 's ago' : 'no data');
+        setAttr(age, 'data-stale', !Limits.at || nowMs() - Limits.at > STALE_AFTER ? '1' : '0');
         blockStartFight(Analysis.blocked());
     }
 
@@ -2373,6 +2453,7 @@
     // sees (watching characterData on body would fire on every damage number).
     // One bounded poll instead, signature-guarded to zero writes when unchanged.
     setInterval(() => {
+        nowMs();                                            // notices a PC clock change even while the tab is hidden
         if (document.hidden || !apiKeyLoaded) return;
         if (!Session.pass()) {
             if (wasAuthorized) onSessionChange();
