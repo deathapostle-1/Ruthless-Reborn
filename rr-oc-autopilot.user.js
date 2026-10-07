@@ -1,13 +1,14 @@
-﻿// ==UserScript==
+// ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.7
+// @version      2.1.9
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
 // @downloadURL  https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
 // @match        https://www.torn.com/factions.php*
 // @noframes
+// @run-at       document-idle
 // @grant        GM.xmlHttpRequest
 // @grant        GM_xmlhttpRequest
 // @grant        GM.getValue
@@ -26,8 +27,7 @@
 
 	// #region Configuration
 
-	// ============================== CONSTANTS ==============================
-	const VERSION = "2.1.7";
+	const VERSION = "2.1.9";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -39,22 +39,25 @@
 	const AUTH_EXPIRY_SKEW_MS = 15 * 1000;
 	const GATE_RETRY_MS = 60 * 1000; // server's failure cooldown and Retry-After
 	const API_KEY_STORAGE = "rr_oc_api_key_v2";
-	const LEGACY_API_KEY_STORAGE = "rr_oc_api_key";
-	const FACTION_COLOURS = {
-		accent: "#029e7a",
-		dark: "#1f1f1f"
-	};
+	const LEGACY_API_KEY_STORAGE = "rr_oc_api_key"; // pre-2.1 copy the page could read; deleted on load
+	const FACTION_COLOURS = { accent: "#029e7a", dark: "#1f1f1f" };
 	const MEMBERS_REFRESH_MS = 60 * 1000; // server refreshes member status every 60 s
 	const CRIMES_REFRESH_MS = 30 * 1000; // server refreshes crime data every 30 s
 	const RETRY_MS = 30 * 1000; // retry window after a failed fetch; a longer Retry-After wins
 	const RENDER_DEBOUNCE_MS = 120; // renderAll() debounce
 	const PUMP_DELAY_MS = 250; // Success queue pacing between requests
+	const SUCCESS_RETRY_MS = 5 * 1000; // a failed success chance is tried again after 5 s, then 10 s
+	const SUCCESS_FAILED_MS = 5 * 60 * 1000; // one that still failed is asked for again after this
+	const MAX_PANELS = 100; // the server takes at most 100 OCs per request
+	const MAX_REQUEST_BYTES = 120 * 1024; // and at most 128 KB; this leaves headroom
+	const REJECTED_RETRY_MS = 10 * 60 * 1000; // a request the server refused as invalid waits this long
+	const STORAGE_TIMEOUT_MS = 10 * 1000; // protected storage that does not answer counts as failed
+	const LOCK_TIMEOUT_MS = 30 * 1000; // another tab's login is not waited for longer than this
 
 	// #endregion
 
 	// #region Utilities
 
-	// ============================== UTILITIES ==============================
 	const sel = (prefix) => `[class*="${prefix}___"]`;
 	const q = (root, s) => root.querySelector(s);
 	const qa = (root, s) => Array.from(root.querySelectorAll(s));
@@ -65,24 +68,20 @@
 		return e;
 	};
 	const safe = (label, fn, fallback = undefined) => {
-		try {
-			return fn();
-		} catch (e) {
-			console.warn(`[RR OC Autopilot] ${label}:`, e);
-			return fallback;
-		}
+		try { return fn(); } catch (e) { console.warn(`[RR OC Autopilot] ${label}:`, e); return fallback; }
 	};
+	// Settles as p does, or fails after ms, so a store or lock that never answers cannot hold a flag.
+	function withTimeout(p, ms, what) {
+		let timer;
+		const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(what + " timeout")), ms); });
+		return Promise.race([p, late]).finally(() => clearTimeout(timer));
+	}
 
 	// Debug logger, opt-in via localStorage `rr_oc_debug` = "1" (useful for mobile bug reports)
 	let DEBUG = false;
-	try {
-		DEBUG = localStorage.getItem("rr_oc_debug") === "1";
-	} catch (e) {}
-	const log = (...a) => {
-		if (DEBUG) console.log("[RR OC Autopilot]", ...a);
-	};
+	try { DEBUG = localStorage.getItem("rr_oc_debug") === "1"; } catch (e) {}
+	const log = (...a) => { if (DEBUG) console.log("[RR OC Autopilot]", ...a); };
 
-	// ============================== TIME ==============================
 	// The PC clock is used only as a stopwatch, so it does not matter how wrong it is. Times from
 	// other computers are read against the server's clock (ServerTime), never against the PC's.
 
@@ -139,91 +138,48 @@
 
 	// #region Storage
 
-	// ============================== STORAGE ==============================
 	// Non-sensitive preferences keep their existing compatibility path.
 	function storeGet(k) {
 		try {
-			if (typeof GM_getValue === "function") {
-				const v = GM_getValue(k, null);
-				if (v != null) return v;
-			}
+			if (typeof GM_getValue === "function") { const v = GM_getValue(k, null); if (v != null) return v; }
 		} catch (e) {}
-		try {
-			return localStorage.getItem(k);
-		} catch (e) {
-			return null;
-		}
+		try { return localStorage.getItem(k); } catch (e) { return null; }
 	}
 
 	function storeSet(k, v) {
-		try {
-			if (typeof GM_setValue === "function") GM_setValue(k, v);
-		} catch (e) {}
-		try {
-			localStorage.setItem(k, v);
-		} catch (e) {}
+		try { if (typeof GM_setValue === "function") GM_setValue(k, v); } catch (e) {}
+		try { localStorage.setItem(k, v); } catch (e) {}
 	}
 
-	function storeDel(k) {
-		try {
-			if (typeof GM_deleteValue === "function") GM_deleteValue(k);
-		} catch (e) {}
-		try {
-			localStorage.removeItem(k);
-		} catch (e) {}
-	}
-
-	async function secureGet(k) {
-		const onPda = typeof window.flutter_inappwebview !== "undefined";
-		if (onPda) {
-			if (typeof PDA_storage === "undefined") {
-				throw new Error("TornPDA 3.15 or newer is required");
-			}
-			return await PDA_storage.get(k, null);
+	// Protected storage: TornPDA's own store, else the script manager's (GM_* or GM.*). A store that
+	// does not answer within STORAGE_TIMEOUT_MS counts as failed.
+	function protectedStore() {
+		if (typeof window.flutter_inappwebview !== "undefined") {
+			if (typeof PDA_storage === "undefined") throw new Error("TornPDA 3.15 or newer is required");
+			return { get: k => PDA_storage.get(k, null), set: (k, v) => PDA_storage.set(k, v), del: k => PDA_storage.delete(k) };
 		}
 		if (typeof GM_getValue === "function") {
-			return await Promise.resolve(GM_getValue(k, null));
+			return { get: k => GM_getValue(k, null), set: (k, v) => GM_setValue(k, v), del: k => typeof GM_deleteValue === "function" && GM_deleteValue(k) };
 		}
 		if (typeof GM !== "undefined" && GM && typeof GM.getValue === "function") {
-			return await GM.getValue(k, null);
+			return { get: k => GM.getValue(k, null), set: (k, v) => GM.setValue(k, v), del: k => GM.deleteValue(k) };
 		}
 		return null;
 	}
+	const timedStore = (op) => withTimeout(Promise.resolve().then(op), STORAGE_TIMEOUT_MS, "storage");
+
+	async function secureGet(k) { const store = protectedStore(); return store ? timedStore(() => store.get(k)) : null; }
 
 	async function secureSet(k, v) {
-		const onPda = typeof window.flutter_inappwebview !== "undefined";
-		if (onPda) {
-			if (typeof PDA_storage === "undefined") {
-				throw new Error("TornPDA 3.15 or newer is required");
-			}
-			await PDA_storage.set(k, v);
-			return;
-		}
-		if (typeof GM_setValue === "function") {
-			await Promise.resolve(GM_setValue(k, v));
-			return;
-		}
-		if (typeof GM !== "undefined" && GM && typeof GM.setValue === "function") {
-			await GM.setValue(k, v);
-			return;
-		}
-		throw new Error("Protected userscript storage unavailable");
+		const store = protectedStore();
+		if (!store) throw new Error("Protected userscript storage unavailable");
+		await timedStore(() => store.set(k, v));
 	}
 
 	async function secureDelete(k) {
-		const onPda = typeof window.flutter_inappwebview !== "undefined";
-		if (onPda) {
-			if (typeof PDA_storage === "undefined") return;
-			await PDA_storage.delete(k);
-			return;
-		}
-		if (typeof GM_deleteValue === "function") {
-			await Promise.resolve(GM_deleteValue(k));
-			return;
-		}
-		if (typeof GM !== "undefined" && GM && typeof GM.deleteValue === "function") {
-			await GM.deleteValue(k);
-		}
+		let store = null;
+		try { store = protectedStore(); } catch (e) { return; }
+		if (store) await timedStore(() => store.del(k));
 	}
 
 	const validApiKey = (value) =>
@@ -233,70 +189,30 @@
 	let apiKeyLoaded = false;
 	let apiKeyChanging = false;
 
+	// Only read here, never rewritten, so one failed storage write cannot lose a saved key.
 	async function loadApiKey() {
-		let candidate = await secureGet(API_KEY_STORAGE);
-		if (!validApiKey(candidate)) candidate = await secureGet(LEGACY_API_KEY_STORAGE);
-		if (!validApiKey(candidate)) {
-			try {
-				candidate = localStorage.getItem(LEGACY_API_KEY_STORAGE);
-			} catch (e) {
-				candidate = null;
-			}
-		}
-
-		if (validApiKey(candidate)) {
-			await secureSet(API_KEY_STORAGE, candidate);
-			if ((await secureGet(API_KEY_STORAGE)) !== candidate) {
-				throw new Error("API key migration could not be verified");
-			}
-			authApiKey = candidate;
-			await secureDelete(LEGACY_API_KEY_STORAGE);
-		} else {
-			authApiKey = "";
-		}
-
-		try {
-			localStorage.removeItem(LEGACY_API_KEY_STORAGE);
-		} catch (e) {}
+		const candidate = await secureGet(API_KEY_STORAGE);
+		authApiKey = validApiKey(candidate) ? candidate : "";
+		secureDelete(LEGACY_API_KEY_STORAGE).catch(() => {}); try { localStorage.removeItem(LEGACY_API_KEY_STORAGE); } catch (e) {}
 	}
 
 	async function saveApiKey(value) {
 		if (value && !validApiKey(value)) throw new Error("Invalid Torn API key");
 		if (value) {
 			await secureSet(API_KEY_STORAGE, value);
-			if ((await secureGet(API_KEY_STORAGE)) !== value) {
-				throw new Error("API key save could not be verified");
-			}
-		} else {
-			await secureDelete(API_KEY_STORAGE);
-		}
+			if ((await secureGet(API_KEY_STORAGE)) !== value) { throw new Error("API key save could not be verified"); }
+		} else { await secureDelete(API_KEY_STORAGE); }
 		authApiKey = value;
-		try {
-			localStorage.removeItem(LEGACY_API_KEY_STORAGE);
-		} catch (e) {}
 	}
 
-	function apiKey() {
-		return authApiKey;
-	}
+	function apiKey() { return authApiKey; }
 
 	// #endregion
 
 	// #region Networking & Data Services
 
-	// ============================== NETWORKING ==============================
-	function requestRaw({
-		method = "GET",
-		url,
-		body,
-		headers
-	}) {
-		const hdrs = Object.assign(
-			body ? {
-				"Content-Type": "application/json"
-			} : {},
-			headers || {},
-		);
+	function requestRaw({ method = "GET", url, body, headers }) {
+		const hdrs = Object.assign(body ? { "Content-Type": "application/json" } : {}, headers || {});
 		const data = body ? JSON.stringify(body) : null;
 		const fromServer = new URL(url).origin === AUTH_API;
 		const timeoutMs = fromServer ? 25000 : 15000;
@@ -353,11 +269,7 @@
 	async function requestJson(options) {
 		const response = await requestRaw(options);
 		let data;
-		try {
-			data = JSON.parse(response.text);
-		} catch (e) {
-			if (response.ok) throw new Error("Invalid JSON response");
-		}
+		try { data = JSON.parse(response.text); } catch (e) { if (response.ok) throw new Error("Invalid JSON response"); }
 		if (!response.ok) {
 			const error = new Error("HTTP " + response.status);
 			error.status = response.status;
@@ -418,11 +330,7 @@
 			Object.assign(this, { token: saved.token, expiresAt: saved.expiresAt, renewedAt: saved.renewedAt, playerId: saved.playerId, factionId: saved.factionId, state: "ok", nextTryAt: 0 });
 			if (this.expiryTimer) clearTimeout(this.expiryTimer);
 			this.expiryTimer = setTimeout(() => {
-				if (nowMs() >= this.expiresAt) {
-					this.token = null;
-					this.state = "unknown";
-					onGateChange();
-				}
+				if (nowMs() >= this.expiresAt) { this.token = null; this.state = "unknown"; onGateChange(); }
 			}, this.expiresAt - nowMs() + 10);
 			this.scheduleRefresh();
 			onGateChange();
@@ -438,7 +346,11 @@
 			try {
 				const fingerprint = await keyFingerprint(key);
 				const renew = async () => {
-					if (gen !== this.gen || key !== apiKey() || await secureGet(API_KEY_STORAGE) !== key) return;
+					if (gen !== this.gen || key !== apiKey()) return;
+					// A key saved or removed in another tab replaces this tab's.
+					const current = await secureGet(API_KEY_STORAGE);
+					if (gen !== this.gen || key !== apiKey()) return;
+					if (current !== key) { adoptKey(current); return; }
 					const saved = await secureGet(SESSION_STORAGE);
 					if (gen !== this.gen || key !== apiKey()) return;
 					const stored = saved && typeof saved === "object" ? { ...saved, expiresAt: fromStored(saved.expiresAt), renewedAt: fromStored(saved.renewedAt) } : null;
@@ -457,67 +369,68 @@
 						const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : serverNow == null ? NaN : Number(data.expiresAt) * 1000 - serverNow;
 						const session = { token: data.token, expiresAt: sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS), renewedAt: nowMs(), playerId: data.playerId, factionId: data.factionId, keyFingerprint: fingerprint };
 						if (!this.accept(session)) throw new Error("Invalid authorization response");
-						await secureSet(SESSION_STORAGE, { ...session, expiresAt: toStored(session.expiresAt), renewedAt: toStored(session.renewedAt) });
+						// Shared with other tabs and later pages; a store that refuses the write only costs them a login.
+						await secureSet(SESSION_STORAGE, { ...session, expiresAt: toStored(session.expiresAt), renewedAt: toStored(session.renewedAt) }).catch(() => {});
 					} else if (response.status === 401 || response.status === 403) {
 						await secureDelete(SESSION_STORAGE);
 						if (gen !== this.gen) return;
 						this.token = null; this.expiresAt = 0; this.state = "denied"; this.nextTryAt = nowMs() + GATE_RETRY_MS; onGateChange();
 					} else this.deferRetry(retryAfterMs(response.headers));
 				};
-				if (navigator.locks?.request) await navigator.locks.request("rr-oc-session", renew);
-				else await renew();
+				// Web Locks keep tabs from logging in at once; a lock not granted in time is not waited for.
+				if (navigator.locks?.request) {
+					const wait = new AbortController(), timer = setTimeout(() => wait.abort(), LOCK_TIMEOUT_MS);
+					try { await navigator.locks.request("rr-oc-session", { signal: wait.signal }, () => { clearTimeout(timer); return renew(); }); }
+					catch (e) { if (e?.name !== "AbortError") throw e; await renew(); }
+					finally { clearTimeout(timer); }
+				} else await renew();
 			} catch (e) { if (gen === this.gen) this.deferRetry(); }
 			finally { if (gen === this.gen) this.busy = false; }
 		},
 	};
 
 	// A session stored before the PC clock was set back carries times from the old setting.
-	function afterClockSetBack() {
-		secureDelete(SESSION_STORAGE).catch(() => {});
-	}
+	function afterClockSetBack() { secureDelete(SESSION_STORAGE).catch(() => {}); }
 
 	// After the clock jumps forward the session may look spent: renew now rather than at the next timer.
-	function afterClockSetForward() {
-		if (apiKeyLoaded) void Gate.refresh();
-	}
+	function afterClockSetForward() { if (apiKeyLoaded) void Gate.refresh(); }
 
+	// A 403 means no longer a member. A 401 means the session ended early (e.g. a server update): log in
+	// again at once, but only once a minute, and only after the refused session is deleted.
+	let unauthorizedAt = -Infinity;
 	async function denyProtected(status, gen, token) {
 		if (gen !== Gate.gen || token !== Gate.token) return;
+		const again = status === 401 && nowMs() - unauthorizedAt > GATE_RETRY_MS;
+		if (status === 401) unauthorizedAt = nowMs();
 		Gate.reset();
 		const deniedGen = Gate.gen;
 		Gate.state = status === 403 ? "denied" : "unknown";
 		Gate.nextTryAt = nowMs() + GATE_RETRY_MS;
 		onGateChange();
-		await secureDelete(SESSION_STORAGE);
-		if (deniedGen === Gate.gen) Gate.refreshTimer = setTimeout(() => void Gate.refresh(), GATE_RETRY_MS);
+		await secureDelete(SESSION_STORAGE).catch(() => {});
+		if (deniedGen !== Gate.gen) return;
+		if (again) { Gate.nextTryAt = 0; void Gate.refresh(); } else Gate.refreshTimer = setTimeout(() => void Gate.refresh(), GATE_RETRY_MS);
+	}
+
+	// Another tab saved or removed the key: this tab follows it.
+	function adoptKey(value) {
+		authApiKey = validApiKey(value) ? value : "";
+		Gate.reset();
+		onGateChange();
 	}
 
 	function onGateChange() {
 		if (!Gate.pass() && document.body.classList.contains("rr-oc-authorized")) document.body.classList.remove("rr-oc-authorized");
 		else if (Gate.pass() && Analysis.result && !document.body.classList.contains("rr-oc-authorized")) document.body.classList.add("rr-oc-authorized");
-		if (settingsGateHook) {
-			try {
-				settingsGateHook();
-			} catch (e) {}
-		}
+		if (settingsGateHook) { try { settingsGateHook(); } catch (e) {} }
 		if (!Gate.pass()) {
-			try {
-				localStorage.removeItem("rr_oc_config");
-			} catch (e) {}
-			Config.data = null;
 			Analysis.reset();
-			Config.at = 0;
-			Config.loading = false;
-			TornApi.members = null;
-			TornApi.fetchedAt = 0;
-			TornApi.factionId = null;
-			TornApi.factionRequest = null;
-			FactionCrimes.byId = null;
-			FactionCrimes.fetchedAt = 0;
-			Success.roles = null;
-			Success.loading = false;
-			Success.nextRolesAt = 0;
+			Object.assign(Config, { data: null, at: 0, loading: null });
+			Object.assign(TornApi, { members: null, fetchedAt: 0 });
+			Object.assign(FactionCrimes, { byId: null, fetchedAt: 0 });
+			Object.assign(Success, { roles: null, loading: null, nextRolesAt: 0 });
 			Success.cache.clear();
+			Success.failedAt.clear();
 			Success.queue.length = 0;
 		}
 		renderAll(true);
@@ -528,12 +441,8 @@
 		if (document.body.classList.contains("rr-oc-authorized")) document.body.classList.remove("rr-oc-authorized");
 		const bar = document.querySelector(".rr-toolbar");
 		if (bar && bar.dataset.mode !== "gate") bar.remove();
-		qa(document, ".rr-meta, .rr-cp, .rr-info, .rr-stat, .rr-lock").forEach(
-			(n) => n.remove(),
-		);
-		qa(document, ".rr-role").forEach((h) =>
-			h.classList.remove("rr-role", "rr-item-missing"),
-		);
+		qa(document, ".rr-meta, .rr-cp, .rr-info, .rr-stat, .rr-lock").forEach((n) => n.remove());
+		qa(document, ".rr-role").forEach((h) => h.classList.remove("rr-role", "rr-item-missing"));
 		qa(
 			document,
 			".rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey",
@@ -541,19 +450,12 @@
 		for (const p of qa(document, "div[data-oc-id]")) {
 			p.removeAttribute("aria-busy");
 			delete p.dataset.rrFp;
-			delete p.dataset.rrLevel;
-			delete p.dataset.rrOpen;
-			delete p.dataset.rrJoinable;
-			delete p.dataset.rrSuccess;
 			p.style.order = "";
 		}
 		panelNodes.clear();
 		restoreNativeEdits(document);
 		const list = listContainer();
-		if (list) {
-			list.style.display = "";
-			list.style.flexDirection = "";
-		}
+		if (list) { list.style.display = ""; list.style.flexDirection = ""; }
 	}
 
 	// A changed observation invalidates only this panel, not the toolbar or other OCs.
@@ -576,27 +478,7 @@
 		delete panel.dataset.rrFp;
 	}
 
-	// ========================== STATUS DEFINITIONS ==========================
-	const STATUS_VIS = {
-		Okay: {
-			timed: false
-		},
-		Hospital: {
-			timed: true
-		},
-		Jail: {
-			timed: true
-		},
-		Federal: {
-			timed: true
-		},
-		Traveling: {
-			timed: false
-		},
-		Abroad: {
-			timed: false
-		},
-	};
+	const TIMED_STATES = ["Hospital", "Jail", "Federal"]; // states with a release time
 	const STATUS_ICON = {
 		Okay: `<svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="#2f9e44"/></svg>`,
 		Hospital: `<svg width="14" height="14" viewBox="0 0 24 24" fill="#e03131"><path d="M9 2h6v7h7v6h-7v7H9v-7H2V9h7z"/></svg>`,
@@ -606,149 +488,124 @@
 	STATUS_ICON.Federal = STATUS_ICON.Jail;
 	STATUS_ICON.Abroad = STATUS_ICON.Traveling;
 
-	// =============== DATA SERVICES: TornApi / FactionCrimes / Success ===============
+	// Member status and crime data share one poll: once per interval, and after a failure no sooner
+	// than RETRY_MS (or the server's Retry-After). A 401/403 for the current session ends it.
+	async function pollProtected(state, path, interval, accept) {
+		if (!Gate.pass() || nowMs() - state.fetchedAt < interval) return;
+		const gen = Gate.gen, token = Gate.token;
+		state.fetchedAt = nowMs();
+		try {
+			const r = await requestJson({ url: AUTH_API + path, headers: { Authorization: `Bearer ${token}` } });
+			if (gen === Gate.gen && Gate.pass() && r && accept(r)) renderAll();
+		} catch (e) {
+			if (gen !== Gate.gen) return;
+			if (e.status === 401 || e.status === 403) {
+				if (token !== Gate.token) { state.fetchedAt = 0; scheduleRender(); return; }
+				await denyProtected(e.status, gen, token); return;
+			}
+			state.fetchedAt = nowMs() - interval + Math.max(RETRY_MS, e.retryAfter || 0);
+			log(path + " refresh failed", e);
+		}
+	}
+
 	const TornApi = {
 		members: null,
 		fetchedAt: 0,
-		factionId: null,
-		factionRequest: null,
-		ensureFactionId() { return Promise.resolve(Gate.pass() ? Gate.factionId : null); },
-		async refresh() {
-			const key = apiKey();
-			if (!key || !Gate.pass()) return;
-			if (nowMs() - this.fetchedAt < MEMBERS_REFRESH_MS) return;
-			const gen = Gate.gen;
-			const token = Gate.token;
-			this.fetchedAt = nowMs();
-			try {
-				const r = await requestJson({
-					url: AUTH_API + "/v1/faction/members",
-					headers: {
-						Authorization: `Bearer ${token}`,
-					},
-				});
-				if (gen === Gate.gen && Gate.pass() && r && Array.isArray(r.members)) {
-					this.members = {};
-					for (const m of r.members) {
-						this.members[m.id] = {
-							state: m.status?.state || "",
-							until: m.status?.until || 0,
-							description: m.status?.description || "",
-						};
-					}
-					renderAll();
-				}
-			} catch (e) {
-				if (gen !== Gate.gen) return;
-				if (e.status === 401 || e.status === 403) {
-					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
-					await denyProtected(e.status, gen, token); return;
-				}
-				this.fetchedAt = nowMs() - MEMBERS_REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
-				log("members refresh failed", e);
-			}
+		refresh() {
+			return pollProtected(this, "/v1/faction/members", MEMBERS_REFRESH_MS, r => {
+				if (!Array.isArray(r.members)) return false;
+				this.members = {};
+				for (const m of r.members) this.members[m.id] = { state: m.status?.state || "", until: m.status?.until || 0, description: m.status?.description || "" };
+				return true;
+			});
 		},
-		statusFor(xid) {
-			return this.members?.[xid] || null;
-		},
+		statusFor(xid) { return this.members?.[xid] || null; },
 	};
 
 	const FactionCrimes = {
 		byId: null,
 		fetchedAt: 0,
-		async refresh() {
-			if (!Gate.pass()) return;
-			if (nowMs() - this.fetchedAt < CRIMES_REFRESH_MS) return;
-			const gen = Gate.gen;
-			const token = Gate.token;
-			this.fetchedAt = nowMs();
-			try {
-				const r = await requestJson({
-					url: AUTH_API + "/v1/oc/crimes",
-					headers: {
-						Authorization: `Bearer ${token}`,
-					},
-				});
-				if (gen === Gate.gen && Gate.pass() && r && Array.isArray(r.crimes)) {
-					this.byId = Object.fromEntries(r.crimes.map(c => [c.id, c]));
-					renderAll();
-				}
-			} catch (e) {
-				if (gen !== Gate.gen) return;
-				if (e && (e.status === 401 || e.status === 403)) {
-					if (token !== Gate.token) { this.fetchedAt = 0; scheduleRender(); return; }
-					await denyProtected(e.status, gen, token); return;
-				}
-				this.fetchedAt = nowMs() - CRIMES_REFRESH_MS + Math.max(RETRY_MS, e.retryAfter || 0);
-				log("crimes refresh failed", e);
-			}
+		refresh() {
+			return pollProtected(this, "/v1/oc/crimes", CRIMES_REFRESH_MS, r => {
+				if (!Array.isArray(r.crimes)) return false;
+				this.byId = Object.fromEntries(r.crimes.map(c => [c.id, c]));
+				return true;
+			});
 		},
-
 	};
+
+	// Third-party data is trimmed to what the server accepts before it is sent: names up to 160
+	// characters, at most 100 scenarios of 20 roles, and thresholds from 0 to 100.
+	const name160 = (v) => typeof v === "string" && v.length <= 160;
+	const percent = (v) => (typeof v === "number" || (typeof v === "string" && /^\d+(?:\.\d+)?$/.test(v))) && Number(v) >= 0 && Number(v) <= 100 ? v : null;
+	const cleanConfig = (data) => data.filter(c => c && name160(c.name) && Array.isArray(c.roles)).slice(0, 100)
+		.map(c => ({ name: c.name, roles: c.roles.filter(r => r && name160(r.label)).slice(0, 20)
+			.map(r => ({ label: r.label, minimumSuccessChance: percent(r.minimumSuccessChance), weight: percent(r.weight) })) }));
+	function cleanRoles(r) {
+		const out = {};
+		if (!r || typeof r !== "object" || Array.isArray(r)) return out;
+		for (const [scenario, roles] of Object.entries(r)) {
+			if (Object.keys(out).length >= 100) break;
+			if (!name160(scenario) || !roles || typeof roles !== "object" || Array.isArray(roles)) continue;
+			out[scenario] = Object.fromEntries(Object.entries(roles).filter(([k, v]) => name160(k) && name160(v)).slice(0, 20));
+		}
+		return out;
+	}
 
 	const Success = {
 		api: "https://tornprobability.com:3000/api/",
 		roles: null,
-		loading: false,
+		loading: null,
 		nextRolesAt: 0,
 		cache: new Map(),
+		failedAt: new Map(), // key -> when a chance that could not be fetched is asked for again
 		queue: [],
 		busy: false,
 		busyJob: null,
+		timer: null,
 		ensureRoles() {
 			if (this.roles || this.loading || !Gate.pass() || nowMs() < this.nextRolesAt) return;
-			const gen = Gate.gen;
-			this.loading = true;
-			requestJson({
-					url: this.api + "GetRoleNames"
-				})
+			const gen = Gate.gen, job = (this.loading = {});
+			requestJson({ url: this.api + "GetRoleNames" })
 				.then((r) => {
 					if (gen !== Gate.gen || !Gate.pass()) return;
-					this.roles = r || {};
-					this.loading = false;
+					this.roles = cleanRoles(r);
 					renderAll(true);
 				})
 				.catch(() => {
 					if (gen !== Gate.gen) return;
-					this.loading = false;
 					this.nextRolesAt = nowMs() + RETRY_MS;
 					setTimeout(scheduleRender, RETRY_MS);
-				});
+				})
+				.finally(() => { if (this.loading === job) this.loading = null; });
 		},
+		due(key) { return !this.cache.has(key) || (this.cache.get(key) === null && nowMs() >= this.failedAt.get(key)); },
 		get(scenario, params, cb) {
 			const key = scenario + "|" + params.join(",");
-			if (this.cache.has(key)) {
-				cb(this.cache.get(key));
-				return;
-			}
+			if (!this.due(key)) { cb(this.cache.get(key)); return; }
 			const pending =
 				this.queue.find((j) => j.key === key && j.gen === Gate.gen) ||
 				(this.busyJob?.key === key && this.busyJob.gen === Gate.gen ? this.busyJob : null);
-			if (pending) {
-				pending.cbs.push(cb);
-				return;
-			}
-			this.queue.push({
-				scenario,
-				params,
-				key,
-				cbs: [cb],
-				tries: 0,
-				gen: Gate.gen
-			});
+			if (pending) { pending.cbs.push(cb); return; }
+			this.queue.push({ scenario, params, key, cbs: [cb], tries: 0, retryAt: 0, gen: Gate.gen });
 			this.pump();
 		},
 		pump() {
-			if (this.busy || !this.queue.length || !Gate.pass()) return;
+			if (this.busy || !Gate.pass()) return;
+			const now = nowMs(), i = this.queue.findIndex((j) => j.retryAt <= now);
+			if (i < 0) {
+				// Only retries are waiting: come back when the first is due.
+				if (this.queue.length && !this.timer) {
+					this.timer = setTimeout(() => { this.timer = null; this.pump(); }, Math.min(...this.queue.map((j) => j.retryAt)) - now);
+				}
+				return;
+			}
 			this.busy = true;
-			const job = (this.busyJob = this.queue.shift());
+			const job = (this.busyJob = this.queue.splice(i, 1)[0]);
 			requestJson({
 					method: "POST",
 					url: this.api + "CalculateSuccess",
-					body: {
-						scenario: job.scenario,
-						parameters: job.params
-					},
+					body: { scenario: job.scenario, parameters: job.params },
 				})
 				.then((r) => {
 					if (job.gen !== Gate.gen || !Gate.pass()) return;
@@ -759,66 +616,43 @@
 					job.cbs.forEach((cb) => cb(r.successChance));
 				})
 				.catch(() => {
-					if (job.gen === Gate.gen && Gate.pass() && ++job.tries < 3) {
-						this.queue.push(job);
-					} else {
-						if (job.gen === Gate.gen && Gate.pass()) {
-							this.cache.set(job.key, null);
-							job.cbs.forEach((cb) => cb(null));
-						}
-					}
+					if (job.gen !== Gate.gen || !Gate.pass()) return;
+					if (++job.tries < 3) { job.retryAt = nowMs() + SUCCESS_RETRY_MS * job.tries; this.queue.push(job); return; }
+					this.cache.set(job.key, null);
+					this.failedAt.set(job.key, nowMs() + SUCCESS_FAILED_MS);
+					job.cbs.forEach((cb) => cb(null));
 				})
 				.finally(() =>
-					setTimeout(() => {
-						this.busy = false;
-						this.busyJob = null;
-						this.pump();
-					}, PUMP_DELAY_MS),
+					setTimeout(() => { this.busy = false; this.busyJob = null; this.pump(); }, PUMP_DELAY_MS),
 				);
 		},
 	};
 
-	// =================== OC THRESHOLDS / WEIGHTS CONFIG (ZZCRAFT) ===================
 	const Config = {
 		data: null,
-		loading: false,
+		loading: null,
 		at: 0,
 		ttl: 6 * 60 * 60 * 1000,
-		load() {
-			try {
-				localStorage.removeItem("rr_oc_config");
-			} catch (e) {}
-			this.data = null;
-			this.at = 0;
-		},
-		ensure() {
-			if (nowMs() - this.at > this.ttl) this.fetch();
-		},
+		ensure() { if (nowMs() - this.at > this.ttl) this.fetch(); },
 		async fetch() {
 			const key = apiKey();
 			if (!key || this.loading || !Gate.pass()) return;
-			const gen = Gate.gen;
-			this.loading = true;
+			const gen = Gate.gen, job = (this.loading = {});
 			try {
-				const factionId = await TornApi.ensureFactionId();
-				if (gen !== Gate.gen || !Gate.pass()) return;
-				if (!factionId) throw new Error("faction unavailable");
 				const data = await requestJson({
-					url: `${ZZCRAFT_API}/Factions/${factionId}/OrganizedCrimes/thresholds`,
-					headers: { "X-Api-Key": key, 'User-Agent': ZZCRAFT_USERAGENT  },
+					url: `${ZZCRAFT_API}/Factions/${Gate.factionId}/OrganizedCrimes/thresholds`,
+					headers: { "X-Api-Key": key, "User-Agent": ZZCRAFT_USERAGENT },
 				});
 				if (gen !== Gate.gen || !Gate.pass()) return;
 				if (!Array.isArray(data)) throw new Error("bad config");
-				this.data = data;
+				this.data = cleanConfig(data);
 				this.at = nowMs();
-				this.loading = false;
 				renderAll(true);
 			} catch (error) {
 				if (gen !== Gate.gen) return;
-				this.loading = false;
 				this.at = nowMs() - this.ttl + RETRY_MS;
 				log("config refresh failed", error);
-			}
+			} finally { if (this.loading === job) this.loading = null; }
 		},
 	};
 
@@ -826,449 +660,88 @@
 
 	// #region Styles
 
-	// ============================== STYLES (CSS) ==============================
-	const STYLE = `.rr-meta {
-    box-sizing: border-box;
-    display: flex;
-    gap: 4px;
-    width: calc(100% - 10px);
-    margin: 5px auto;
-    position: relative;
-    z-index: 1
-  }
-
-  .rr-meta .rr-cell {
-    flex: 1;
-    min-width: 0;
-    padding: 3px 4px;
-    border-radius: 4px;
-    text-align: center;
-    background:${FACTION_COLOURS.dark};
-    border: 1px solid rgba(2, 158, 122, .45)
-  }
-
-  .rr-meta .rr-l {
-    font-size: 10px;
-    letter-spacing: .5px;
-    color:${FACTION_COLOURS.accent};
-    opacity: .95
-  }
-
-  .rr-meta .rr-v {
-    font-size: 11px;
-    font-weight: 700;
-    color: #fff
-  }
-
-  .rr-cp {
-    box-sizing: border-box;
-    width: calc(100% - 10px);
-    height: 4px;
-    margin: 0 auto 5px;
-    border-radius: 2px;
-    overflow: hidden;
-    background: var(--oc-clock-bg, rgba(255, 255, 255, .12))
-  }
-
-  .rr-cp > i {
-    display: block;
-    height: 100%;
-    background:${FACTION_COLOURS.accent}
-  }
-
-  .rr-cp.rr-amber > i {
-    background: #db7b2b
-  }
-
-  .rr-cp.rr-fail > i {
-    background: #cc3232
-  }
-
-  .rr-role.rr-role {
-    box-sizing: border-box;
-    width: 100% !important;
-    margin: 0 !important;
-    border: none !important;
-    border-radius: 6px 6px 0 0 !important;
-    background:${FACTION_COLOURS.dark} !important;
-    padding: 0 6px 0 20px !important
-  }
-
-	body.rr-oc-authorized #faction-crimes-root [class*="slotIcon___"] {
-    display: none !important
-  }
-
-	body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"] [class*="title___"] {
-    color: #fff !important
-  }
-
-	body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] {
-    color: #cc3232 !important
-  }
-
-  .rr-info {
-    display: flex;
-    align-items: center;
-    flex: 0 0 auto;
-    margin: 0 6px;
-    min-width: 0
-  }
-
-  .rr-success {
-    position: relative;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 2px 10px;
-    border-radius: 10px;
-    font-size: 12px;
-    font-weight: 700;
-    line-height: 1.5;
-    white-space: nowrap;
-    color: #fff !important;
-    background:${FACTION_COLOURS.dark};
-    border: 1px solid var(--rr-c, #444);
-    box-shadow: 0 0 7px -1px var(--rr-c, transparent);
-    cursor: default
-  }
-
-  .rr-pip {
-    width: 8px;
-    height: 8px;
-    border-radius: 50%;
-    flex: none;
-    box-shadow: 0 0 0 1px rgba(255, 255, 255, .28)
-  }
-
-  .rr-stat {
-    position: absolute;
-    top: 3px;
-    left: 4px;
-    width: 14px;
-    height: 14px;
-    z-index: 5;
-    pointer-events: none;
-    display: flex
-  }
-
-  .rr-stat svg {
-    display: block
-  }
-
-  .rr-fill-green,
-  .rr-fill-amber,
-  .rr-fill-red,
-  .rr-fill-grey {
-    position: relative;
-    border-radius: 6px;
-    background: #2b2b2b !important
-  }
-
-  .rr-fill-green {
-    box-shadow: 0 0 0 2px #029e7a, 0 0 9px rgba(2, 158, 122, .5) !important
-  }
-
-  .rr-fill-amber {
-    box-shadow: 0 0 0 2px #db7b2b, 0 0 8px rgba(219, 123, 43, .45) !important
-  }
-
-  .rr-fill-red {
-    box-shadow: 0 0 0 2px #cc3232, 0 0 8px rgba(204, 50, 50, .45) !important
-  }
-
-  .rr-fill-grey {
-    box-shadow: 0 0 0 2px rgba(150, 150, 150, .6), 0 0 8px rgba(150, 150, 150, .3) !important
-  }
-
-	body.rr-oc-authorized #faction-crimes-root [class*="slotBody___"] {
-    background: transparent !important;
-    border-color: transparent !important
-  }
-
-  .tt-oc-highlight .rr-fill-green,
-  .tt-oc-highlight .rr-fill-amber,
-  .tt-oc-highlight .rr-fill-red,
-  .tt-oc-highlight .rr-fill-grey {
-    outline: 2px solid rgba(0, 0, 0, .6) !important;
-    outline-offset: 2px
-  }
-
-  .rr-lock {
-    position: absolute;
-    inset: 0;
-    z-index: 40;
-    display: flex;
-    align-items: flex-end;
-    justify-content: center;
-    cursor: not-allowed;
-    padding: 5px
-  }
-
-  .rr-lock span {
-    background: rgba(31, 31, 31, .94);
-    border: 1px solid rgba(150, 150, 150, .5);
-    color: #cfcfcf;
-    font-size: 10px;
-    font-weight: 600;
-    padding: 2px 8px;
-    border-radius: 8px;
-    line-height: 1.4;
-    text-align: center
-  }
-
-  .rr-toolbar {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 8px;
-    align-items: center;
-    margin: 8px 0;
-    padding: 8px 12px;
-    background:${FACTION_COLOURS.dark};
-    border: 1px solid rgba(2, 158, 122, .5);
-    border-radius: 6px
-  }
-
-  .rr-brand {
-    color:${FACTION_COLOURS.accent};
-    font-weight: 700;
-    font-size: 12px;
-    letter-spacing: 1.5px
-  }
-
-  .rr-brand small {
-    color: #8a8a8a;
-    font-weight: 600;
-    letter-spacing: 1px
-  }
-
-  .rr-count {
-    font-size: 11px;
-    color: #8a8a8a;
-    white-space: nowrap
-  }
-
-	.rr-auth-state {
-		margin-left: auto;
-		color: #8a8a8a;
-		font-size: 11px
-	}
-
-  .rr-right {
-    margin-left: auto;
-    display: flex;
-    gap: 8px;
-    align-items: center;
-    flex-wrap: wrap
-  }
-
-	.rr-toolbar select {
-    background: #2a2a2a;
-    color: #ddd;
-    border: 1px solid #444;
-    border-radius: 4px;
-    padding: 3px 6px;
-    font-size: 12px
-  }
-
-  .rr-api {
-    background: transparent;
-    border:1px solid ${FACTION_COLOURS.accent};
-    color:${FACTION_COLOURS.accent};
-    border-radius: 4px;
-    padding: 3px 10px;
-    cursor: pointer;
-    font-size: 11px;
-    font-weight: 700;
-    letter-spacing: 1px;
-  }
-
-  .rr-api:hover,
-	.rr-api:focus-visible {
-    background:${FACTION_COLOURS.accent};
-    color: #fff
-  }
-
-	.rr-api:disabled { opacity: .5; cursor: default }
-
-	.rr-gear {
-		background: none;
-		border: none;
-		color: #8a8a8a;
-	font-size: 15px;
-		line-height: 1;
-	padding: 0 4px;
-		cursor: pointer
-	}
-
-	.rr-gear:hover { color:${FACTION_COLOURS.accent} }
-
-	.rr-set-overlay {
-		position: fixed;
-		inset: 0;
-		z-index: 999999;
-		background: rgba(0, 0, 0, .8);
-		backdrop-filter: blur(4px);
-		display: flex;
-		justify-content: center;
-		align-items: center
-	}
-
-	.rr-set-modal {
-		display: flex;
-		flex-direction: column;
-		width: min(520px, 94vw);
-		max-height: min(86vh, 700px);
-		overflow: hidden;
-		background: linear-gradient(180deg, #23252b, #1b1d22);
-		border: 1px solid rgba(2, 158, 122, .5);
-		border-radius: 8px;
-		box-shadow: 0 2px 10px rgba(0, 0, 0, .35);
-		color: #d7d9de;
-		font-size: 12px
-	}
-
-	.rr-set-head {
-		display: flex;
-		align-items: center;
-		justify-content: space-between;
-		gap: 12px;
-		padding: 12px 14px;
-		background: linear-gradient(180deg, #2c2f37, #23252b);
-		border-bottom: 1px solid #34373f
-	}
-
-	.rr-set-head b { color:${FACTION_COLOURS.accent}; letter-spacing: 1px }
-	.rr-set-close {
-		width: 28px;
-		height: 28px;
-		display: inline-flex;
-		align-items: center;
-		justify-content: center;
-		background: none;
-		border: none;
-		color: #8a8a8a;
-		font-size: 22px;
-		line-height: 1;
-		cursor: pointer
-	}
-	.rr-set-close:hover { color: #fff }
-	.rr-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px }
-	.rr-set-section {
-		background: #1a1a1a;
-		border: 1px solid #34373f;
-		border-radius: 6px;
-		padding: 12px
-	}
-	.rr-set-title {
-		color: #8a8d96;
-		font-size: 10px;
-		font-weight: 700;
-		letter-spacing: .07em;
-		text-transform: uppercase;
-		margin-bottom: 10px
-	}
-	.rr-set-input {
-		width: 100%;
-		box-sizing: border-box;
-		background: #15161a;
-		color: #d7d9de;
-		border: 1px solid #34373f;
-		border-radius: 5px;
-		padding: 6px 8px;
-		font: inherit;
-		text-align: center;
-		letter-spacing: 2px;
-		margin-bottom: 10px
-	}
-	.rr-set-input:focus { border-color:${FACTION_COLOURS.accent}; outline: none }
-	.rr-set-input[data-bad="1"] { border-color: #e74c3c }
-	.rr-set-status {
-		text-align: center;
-		padding: 8px;
-		background: #15161a;
-		border: 1px solid #34373f;
-		border-radius: 5px;
-		font-size: 11px;
-		margin-bottom: 10px
-	}
-	.rr-set-status[data-state="ok"] { color: #2ecc71 }
-	.rr-set-status[data-state="bad"] { color: #e74c3c }
-	.rr-set-status[data-state="wait"] { color: #e0a80d }
-	.rr-set-actions { display: flex; gap: 8px }
-	.rr-set-actions .rr-api { flex: 1 }
-
-	@media (max-width: 560px) {
-		.rr-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto }
-		.rr-set-modal { margin: auto; max-height: 92vh }
-	}
-
-  .rr-legend {
-    display: flex;
-    gap: 10px;
-    flex-wrap: wrap;
-    align-items: center;
-    font-size: 11px;
-    color: #b9c1bd
-  }
-
-  .rr-legend span {
-    display: inline-flex;
-    align-items: center;
-    gap: 4px
-  }
-
-  .rr-legend i {
-    width: 10px;
-    height: 10px;
-    border-radius: 2px;
-    display: inline-block
-  }
-
-  body:not(.dark-mode) .rr-fill-green,
-  body:not(.dark-mode) .rr-fill-amber,
-  body:not(.dark-mode) .rr-fill-red,
-  body:not(.dark-mode) .rr-fill-grey {
-    background: #e2e4e6 !important
-  }
-
-  body:not(.dark-mode) .rr-role.rr-role {
-    background: #d4d7da !important
-  }
-
-	body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"] [class*="title___"] {
-    color: #2a2a2a !important
-  }
-
-	body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] {
-    color: #cc3232 !important
-  }
-
-  body:not(.dark-mode) .rr-meta .rr-cell {
-    background: #eef0f1
-  }
-
-  body:not(.dark-mode) .rr-meta .rr-v {
-    color: #222
-  }
-
-  body:not(.dark-mode) .rr-success {
-    background: #eef0f1;
-    color: #222 !important
-  }
-
-  body:not(.dark-mode) .rr-cp {
-    background: rgba(0, 0, 0, .12)
-  }
-
-  body:not(.dark-mode) .rr-legend i {
-    box-shadow: 0 0 0 1px rgba(0, 0, 0, .25)
-  }`;
+	const STYLE = `
+		.rr-meta { box-sizing: border-box; display: flex; gap: 4px; width: calc(100% - 10px); margin: 5px auto; position: relative; z-index: 1; }
+		.rr-meta .rr-cell { flex: 1; min-width: 0; padding: 3px 4px; border-radius: 4px; text-align: center; background:${FACTION_COLOURS.dark}; border: 1px solid rgba(2, 158, 122, .45); }
+		.rr-meta .rr-l { font-size: 10px; letter-spacing: .5px; color:${FACTION_COLOURS.accent}; opacity: .95; }
+		.rr-meta .rr-v { font-size: 11px; font-weight: 700; color: #fff; }
+		.rr-cp { box-sizing: border-box; width: calc(100% - 10px); height: 4px; margin: 0 auto 5px; border-radius: 2px; overflow: hidden; background: var(--oc-clock-bg, rgba(255, 255, 255, .12)); }
+		.rr-cp > i { display: block; height: 100%; background:${FACTION_COLOURS.accent}; }
+		.rr-cp.rr-amber > i { background: #db7b2b; }
+		.rr-cp.rr-fail > i { background: #cc3232; }
+		.rr-role.rr-role { box-sizing: border-box; width: 100% !important; margin: 0 !important; border: none !important; border-radius: 6px 6px 0 0 !important; background:${FACTION_COLOURS.dark} !important; padding: 0 6px 0 20px !important; }
+		body.rr-oc-authorized #faction-crimes-root [class*="slotIcon___"] { display: none !important; }
+		body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"] [class*="title___"] { color: #fff !important; }
+		body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] { color: #cc3232 !important; }
+		.rr-info { display: flex; align-items: center; flex: 0 0 auto; margin: 0 6px; min-width: 0; }
+		.rr-success { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 700; line-height: 1.5; white-space: nowrap; color: #fff !important; background:${FACTION_COLOURS.dark}; border: 1px solid var(--rr-c, #444); box-shadow: 0 0 7px -1px var(--rr-c, transparent); cursor: default; }
+		.rr-pip { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px rgba(255, 255, 255, .28); }
+		.rr-stat { position: absolute; top: 3px; left: 4px; width: 14px; height: 14px; z-index: 5; pointer-events: none; display: flex; }
+		.rr-stat svg { display: block; }
+		.rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey { position: relative; border-radius: 6px; background: #2b2b2b !important; }
+		.rr-fill-green { box-shadow: 0 0 0 2px #029e7a, 0 0 9px rgba(2, 158, 122, .5) !important; }
+		.rr-fill-amber { box-shadow: 0 0 0 2px #db7b2b, 0 0 8px rgba(219, 123, 43, .45) !important; }
+		.rr-fill-red { box-shadow: 0 0 0 2px #cc3232, 0 0 8px rgba(204, 50, 50, .45) !important; }
+		.rr-fill-grey { box-shadow: 0 0 0 2px rgba(150, 150, 150, .6), 0 0 8px rgba(150, 150, 150, .3) !important; }
+		body.rr-oc-authorized #faction-crimes-root [class*="slotBody___"] { background: transparent !important; border-color: transparent !important; }
+		.tt-oc-highlight .rr-fill-green, .tt-oc-highlight .rr-fill-amber, .tt-oc-highlight .rr-fill-red, .tt-oc-highlight .rr-fill-grey { outline: 2px solid rgba(0, 0, 0, .6) !important; outline-offset: 2px; }
+		.rr-lock { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 40; display: flex; align-items: flex-end; justify-content: center; cursor: not-allowed; padding: 5px; }
+		.rr-lock span { background: rgba(31, 31, 31, .94); border: 1px solid rgba(150, 150, 150, .5); color: #cfcfcf; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 8px; line-height: 1.4; text-align: center; }
+		.rr-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 8px 12px; background:${FACTION_COLOURS.dark}; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; }
+		.rr-brand { color:${FACTION_COLOURS.accent}; font-weight: 700; font-size: 12px; letter-spacing: 1.5px; }
+		.rr-brand small { color: #8a8a8a; font-weight: 600; letter-spacing: 1px; }
+		.rr-count { font-size: 11px; color: #8a8a8a; white-space: nowrap; }
+		.rr-auth-state { margin-left: auto; color: #8a8a8a; font-size: 11px; }
+		.rr-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+		.rr-toolbar select { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
+		.rr-api { background: transparent; border:1px solid ${FACTION_COLOURS.accent}; color:${FACTION_COLOURS.accent}; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+		.rr-api:hover { background:${FACTION_COLOURS.accent}; color: #fff; }
+		.rr-api:focus-visible { background:${FACTION_COLOURS.accent}; color: #fff; }
+		.rr-api:disabled { opacity: .5; cursor: default; }
+		.rr-gear { background: none; border: none; color: #8a8a8a; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
+		.rr-gear:hover { color:${FACTION_COLOURS.accent}; }
+		.rr-set-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999999; background: rgba(0, 0, 0, .8); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; justify-content: center; align-items: center; }
+		.rr-set-modal { display: flex; flex-direction: column; width: min(520px, 94vw); max-height: min(86vh, 700px); overflow: hidden; background: linear-gradient(180deg, #23252b, #1b1d22); border: 1px solid rgba(2, 158, 122, .5); border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); color: #d7d9de; font-size: 12px; }
+		.rr-set-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; background: linear-gradient(180deg, #2c2f37, #23252b); border-bottom: 1px solid #34373f; }
+		.rr-set-head b { color:${FACTION_COLOURS.accent}; letter-spacing: 1px; }
+		.rr-set-close { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #8a8a8a; font-size: 22px; line-height: 1; cursor: pointer; }
+		.rr-set-close:hover { color: #fff; }
+		.rr-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
+		.rr-set-section { background: #1a1a1a; border: 1px solid #34373f; border-radius: 6px; padding: 12px; }
+		.rr-set-section + .rr-set-section { margin-top: 12px; }
+		.rr-set-note { color: #8a8d96; font-size: 11px; line-height: 1.45; margin-top: 6px; }
+		.rr-set-title { color: #8a8d96; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 10px; }
+		.rr-set-input { width: 100%; box-sizing: border-box; background: #15161a; color: #d7d9de; border: 1px solid #34373f; border-radius: 5px; padding: 6px 8px; font: inherit; text-align: center; letter-spacing: 2px; margin-bottom: 10px; }
+		.rr-set-input:focus { border-color:${FACTION_COLOURS.accent}; outline: none; }
+		.rr-set-input[data-bad="1"] { border-color: #e74c3c; }
+		.rr-set-status { text-align: center; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; font-size: 11px; margin-bottom: 10px; }
+		.rr-set-status[data-state="ok"] { color: #2ecc71; }
+		.rr-set-status[data-state="bad"] { color: #e74c3c; }
+		.rr-set-status[data-state="wait"] { color: #e0a80d; }
+		.rr-set-actions { display: flex; gap: 8px; }
+		.rr-set-actions .rr-api { flex: 1; }
+		@media (max-width: 560px) {
+			.rr-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto; }
+			.rr-set-modal { margin: auto; max-height: 92vh; }
+		}
+		.rr-legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; color: #b9c1bd; }
+		.rr-legend span { display: inline-flex; align-items: center; gap: 4px; }
+		.rr-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
+		body:not(.dark-mode) .rr-fill-green, body:not(.dark-mode) .rr-fill-amber, body:not(.dark-mode) .rr-fill-red, body:not(.dark-mode) .rr-fill-grey { background: #e2e4e6 !important; }
+		body:not(.dark-mode) .rr-role.rr-role { background: #d4d7da !important; }
+		body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"] [class*="title___"] { color: #2a2a2a !important; }
+		body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] { color: #cc3232 !important; }
+		body:not(.dark-mode) .rr-meta .rr-cell { background: #eef0f1; }
+		body:not(.dark-mode) .rr-meta .rr-v { color: #222; }
+		body:not(.dark-mode) .rr-success { background: #eef0f1; color: #222 !important; }
+		body:not(.dark-mode) .rr-cp { background: rgba(0, 0, 0, .12); }
+		body:not(.dark-mode) .rr-legend i { box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); }
+	`;
 
 	// #endregion
 
 	// #region DOM Parsing & Rendering
 
-	// ============================== PANEL PARSING ==============================
 	function parsePanel(panel) {
 		const title = q(panel, sel("panelTitle"))?.textContent.trim() || "";
 		const slugEl = q(panel, '[style*="organizedCrimes/scenario"]');
@@ -1280,27 +753,12 @@
 		const slots = qa(panel, sel("slotHeader")).map((header) => {
 			const wrap = header.parentElement;
 			const role = q(header, sel("title"))?.textContent.trim() || "";
-			const chance = parseFloat(
-				q(header, sel("successChance"))?.textContent || "",
-			);
+			const chance = parseFloat(q(header, sel("successChance"))?.textContent || "");
 			const profile = q(wrap, 'a[href*="profiles.php?XID="]');
 			const xid = profile ? profile.href.match(/XID=(\d+)/)?.[1] : null;
-			return {
-				wrap,
-				header,
-				role,
-				chance: isNaN(chance) ? null : chance,
-				xid,
-			};
+			return { wrap, header, role, chance: isNaN(chance) ? null : chance, xid };
 		});
-		return {
-			panel,
-			ocId: panel.getAttribute("data-oc-id"),
-			title,
-			level,
-			slug,
-			slots,
-		};
+		return { panel, ocId: panel.getAttribute("data-oc-id"), title, level, slug, slots };
 	}
 
 	const panelNodes = new Map();
@@ -1321,7 +779,7 @@
 	function restoreNativeEdits(root) {
 		for (const [node, record] of nativeContents) {
 			if (root !== document && root !== node && !root.contains(node)) continue;
-			if (ownsNativeContents(node, record)) node.replaceChildren(...record.original);
+			if (ownsNativeContents(node, record)) { node.textContent = ""; node.append(...record.original); } // replaceChildren needs iOS 14
 			nativeContents.delete(node);
 		}
 		for (const [node, original] of nativePositions) {
@@ -1352,7 +810,6 @@
 		}
 	}
 
-	// ============================== SLOT RENDERING ==============================
 	function renderMeta(slot, decision) {
 		const w = decision.weight;
 		const req = decision.required;
@@ -1374,10 +831,7 @@
 		const index = qa(slot.wrap.closest("div[data-oc-id]"), sel("slotHeader")).findIndex(h => h.parentElement === slot.wrap);
 		const failed = Analysis.result?.panels.find(p => p.ocId === ocId)?.slots[index]?.failed || false;
 		let bar = slot.wrap.querySelector(".rr-cp");
-		if (!failed && !deg) {
-			bar?.remove();
-			return;
-		}
+		if (!failed && !deg) { bar?.remove(); return; }
 		if (!bar) {
 			bar = el("div", "rr-cp", "<i></i>");
 			slot.wrap.insertBefore(bar, slot.wrap.querySelector(".rr-meta"));
@@ -1404,9 +858,8 @@
 		if (!row.contains(pill)) row.appendChild(pill);
 		if (!panel.contains(row)) q(panel, sel("panelTitle"))?.after(row);
 		cacheNode(ocId, "info", row);
-		cacheNode(ocId, "success", pill);
 		const query = decision.probability;
-		if (!Success.cache.has(query.key)) Success.get(query.scenario, query.params, scheduleRender);
+		if (Success.due(query.key)) Success.get(query.scenario, query.params, scheduleRender);
 	}
 
 	const relative = (e) => {
@@ -1415,12 +868,7 @@
 			e.style.position = "relative";
 		}
 	};
-	const FILL = [
-		"rr-fill-green",
-		"rr-fill-amber",
-		"rr-fill-red",
-		"rr-fill-grey",
-	];
+	const FILL = ["rr-fill-green", "rr-fill-amber", "rr-fill-red", "rr-fill-grey"];
 
 	function renderStatusIcon(s, onCompleted) {
 		let icon = s.wrap.querySelector(".rr-stat");
@@ -1428,19 +876,9 @@
 			TornApi.statusFor(s.xid) :
 			null;
 		const svg = st && STATUS_ICON[st.state];
-		if (!svg) {
-			icon?.remove();
-			return;
-		}
-		if (!icon) {
-			icon = el("span", "rr-stat");
-			relative(s.wrap);
-			s.wrap.appendChild(icon);
-		}
-		if (icon.dataset.st !== st.state) {
-			icon.dataset.st = st.state;
-			icon.innerHTML = svg;
-		}
+		if (!svg) { icon?.remove(); return; }
+		if (!icon) { icon = el("span", "rr-stat"); relative(s.wrap); s.wrap.appendChild(icon); }
+		if (icon.dataset.st !== st.state) { icon.dataset.st = st.state; icon.innerHTML = svg; }
 	}
 
 	function humanLeft(secs) {
@@ -1453,7 +891,6 @@
 		return `${secs}s`;
 	}
 
-	// ============================ TOOLTIP AUGMENTATION ============================
 	function slotWrapOf(elm) {
 		for (let e = elm; e && e !== document.body; e = e.parentElement) {
 			if (e.querySelector?.(`:scope > ${sel("slotHeader")}`)) return e;
@@ -1463,41 +900,28 @@
 
 	function tooltipNode(node) {
 		if (!(node instanceof Element)) return null;
-		if (
-			node.matches('[class*="tooltip___"]') ||
-			node.hasAttribute("data-floating-ui-focusable")
-		) {
-			return node;
-		}
+		if (node.matches('[class*="tooltip___"]') || node.hasAttribute("data-floating-ui-focusable")) { return node; }
 		return node.querySelector?.('[class*="tooltip___"]') || null;
 	}
 
 	function tooltipTrigger(tip) {
-		if (tip.id) {
-			const ref = document.querySelector(`[aria-describedby~="${tip.id}"]`);
-			if (ref) return ref;
-		}
-		const opened = document.querySelector(
-			`${sel("slotHeader")}[data-is-tooltip-opened="true"]`,
-		);
+		if (tip.id) { const ref = document.querySelector(`[aria-describedby~="${tip.id}"]`); if (ref) return ref; }
+		const opened = document.querySelector(`${sel("slotHeader")}[data-is-tooltip-opened="true"]`);
 		if (opened) return opened;
 		return [...document.querySelectorAll(":hover")].pop() || null;
 	}
 
 	function statusText(st) {
-		const vis = st && STATUS_VIS[st.state];
-		if (!vis) return null;
+		if (!st || !STATUS_ICON[st.state]) return null;
 		if (st.state === "Okay") return "Available";
-		if (vis.timed && st.until) {
+		if (TIMED_STATES.includes(st.state) && st.until) {
 			// Torn's release time is read against the server's clock, not this PC's.
 			const serverNow = ServerTime.estimate();
 			if (serverNow == null) return st.state;
 			const left = st.until - Math.floor(serverNow / 1000);
 			return left > 0 ? `${st.state} — out in ${humanLeft(left)}` : st.state;
 		}
-		if (st.state === "Traveling" || st.state === "Abroad") {
-			return st.description || st.state;
-		}
+		if (st.state === "Traveling" || st.state === "Abroad") { return st.description || st.state; }
 		return null;
 	}
 
@@ -1527,14 +951,9 @@
 		if (tip.__rrObs) { apply(); return; }
 		tip.__rrObs = new MutationObserver(apply);
 		apply();
-		tip.__rrObs.observe(tip, {
-			childList: true,
-			subtree: true,
-			characterData: true,
-		});
+		tip.__rrObs.observe(tip, { childList: true, subtree: true, characterData: true });
 	}
 
-	// ============================== SLOT STATE ==============================
 	function renderSlotState(info, decision, tab) {
 		info.slots.forEach((s, i) => {
 			const d = decision.slots[i];
@@ -1556,25 +975,16 @@
 
 	// #region Toolbar & Settings
 
-	// ========================= TABS / TOOLBAR / VISIBILITY =========================
 	function activeTab() {
-		const btn = document.querySelector(
-			`${sel("buttonsContainer")} button${sel("active")}`,
-		);
+		const btn = document.querySelector(`${sel("buttonsContainer")} button${sel("active")}`);
 		return btn ? q(btn, sel("tabName"))?.textContent.trim() || null : null;
 	}
 
-	function listContainer() {
-		return document.querySelector("div[data-oc-id]")?.parentElement || null;
-	}
+	function listContainer() { return document.querySelector("div[data-oc-id]")?.parentElement || null; }
 
-	const SORT_OPTIONS = [
-		"default",
-		"success-desc",
-		"success-asc",
-		"level-desc",
-		"level-asc",
-	];
+	const SORT_LABELS = { default: "Sort: default", "success-desc": "Success ↓", "success-asc": "Success ↑", "level-desc": "Level ↓", "level-asc": "Level ↑" };
+	const SORT_OPTIONS = Object.keys(SORT_LABELS);
+	const LEGEND = [["#029e7a", "Eligible"], ["#db7b2b", "Close"], ["#cc3232", "Below"], ["#6a6a6a", "No data"]];
 
 	async function applyApiKey(value) {
 		if (apiKeyChanging) throw new Error("API key change already in progress");
@@ -1584,20 +994,14 @@
 			onGateChange();
 			await secureDelete(SESSION_STORAGE);
 			await saveApiKey(value);
-			Config.load();
-		} finally {
-			apiKeyChanging = false;
-		}
+		} finally { apiKeyChanging = false; }
 		onGateChange();
 		void Gate.refresh();
 	}
 
 	async function validateKey(button, setStatus) {
 		const key = apiKey();
-		if (!validApiKey(key)) {
-			setStatus("No valid key saved - Save first", "bad");
-			return;
-		}
+		if (!validApiKey(key)) { setStatus("No valid key saved - Save first", "bad"); return; }
 
 		button.disabled = true;
 		setStatus("Validating…", "wait");
@@ -1606,11 +1010,7 @@
 			if (Gate.pass()) setStatus("Valid and authorized", "ok");
 			else if (Gate.state === "denied") setStatus("Access restricted", "bad");
 			else setStatus("Authorization unavailable", "wait");
-		} catch (e) {
-			setStatus("Connection error", "bad");
-		} finally {
-			button.disabled = false;
-		}
+		} catch (e) { setStatus("Connection error", "bad"); } finally { button.disabled = false; }
 	}
 
 	let settingsEscapeHandler = null;
@@ -1632,10 +1032,7 @@
 
 	function openSettings(trigger) {
 		const existing = document.getElementById("rr-oc-settings");
-		if (existing) {
-			q(existing, ".rr-set-input")?.focus();
-			return;
-		}
+		if (existing) { q(existing, ".rr-set-input")?.focus(); return; }
 		settingsTrigger = trigger || document.activeElement;
 
 		const overlay = el("div", "rr-set-overlay");
@@ -1657,6 +1054,14 @@
             <button type="button" class="rr-api" data-action="remove">Remove</button>
           </div>
         </div>
+        <div class="rr-set-section">
+          <div class="rr-set-title">How your API key is used</div>
+          <div class="rr-set-note"><b>Storage:</b> your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.</div>
+          <div class="rr-set-note"><b>Sharing:</b> sent to the RR server (membership check) and to ZZCraft (OC thresholds, sent as an X-Api-Key header).</div>
+          <div class="rr-set-note"><b>Purpose:</b> Ruthless Reborn faction organised crime planning.</div>
+          <div class="rr-set-note"><b>Key storage:</b> your userscript manager's storage, or TornPDA's storage.</div>
+          <div class="rr-set-note"><b>Access level:</b> Public Access key only.</div>
+        </div>
       </div>
     `);
 		modal.setAttribute("role", "dialog");
@@ -1666,10 +1071,7 @@
 		const status = q(modal, ".rr-set-status");
 		input.value = apiKey();
 
-		const setStatus = (text, state = "") => {
-			status.textContent = text;
-			status.dataset.state = state;
-		};
+		const setStatus = (text, state = "") => { status.textContent = text; status.dataset.state = state; };
 		settingsGateHook = () => {
 			if (!input.isConnected || !validApiKey(input.value.trim())) return;
 			if (Gate.pass()) setStatus("Valid and authorized", "ok");
@@ -1693,13 +1095,8 @@
 			try {
 				await applyApiKey(value);
 				if (!value) setStatus("No API key set", "");
-				else if (!Gate.pass() && Gate.state !== "denied") {
-					setStatus("Key saved; verifying…", "wait");
-				}
-			} catch (e) {
-				input.dataset.bad = "1";
-				setStatus("Protected storage unavailable", "bad");
-			}
+				else if (!Gate.pass() && Gate.state !== "denied") { setStatus("Key saved; verifying…", "wait"); }
+			} catch (e) { input.dataset.bad = "1"; setStatus("Protected storage unavailable", "bad"); }
 		};
 
 		modal.addEventListener("click", event => {
@@ -1714,21 +1111,13 @@
 					.catch(() => setStatus("Protected storage unavailable", "bad"));
 			}
 		});
-		input.addEventListener("keydown", event => {
-			if (event.key === "Enter") void save();
-		});
+		input.addEventListener("keydown", event => { if (event.key === "Enter") void save(); });
 		q(modal, ".rr-set-close").addEventListener("click", closeSettings);
 
 		let downOnOverlay = false;
-		overlay.addEventListener("mousedown", event => {
-			downOnOverlay = event.target === overlay;
-		});
-		overlay.addEventListener("click", event => {
-			if (event.target === overlay && downOnOverlay) closeSettings();
-		});
-		settingsEscapeHandler = event => {
-			if (event.key === "Escape") closeSettings();
-		};
+		overlay.addEventListener("mousedown", event => { downOnOverlay = event.target === overlay; });
+		overlay.addEventListener("click", event => { if (event.target === overlay && downOnOverlay) closeSettings(); });
+		settingsEscapeHandler = event => { if (event.key === "Escape") closeSettings(); };
 		document.addEventListener("keydown", settingsEscapeHandler);
 
 		overlay.appendChild(modal);
@@ -1743,11 +1132,7 @@
 	}
 
 	const Toolbar = {
-		state: {
-			sort: SORT_OPTIONS.includes(storeGet("rr_oc_sort")) ?
-				storeGet("rr_oc_sort") :
-				"default",
-		},
+		state: { sort: SORT_OPTIONS.includes(storeGet("rr_oc_sort")) ? storeGet("rr_oc_sort") : "default" },
 		gateMessage() {
 			if (!apiKey()) return "Enter your Torn API key to activate";
 			return Gate.state === "denied" ?
@@ -1757,17 +1142,11 @@
 		ensure(tab, gateOnly = false) {
 			const mode = gateOnly ? "gate" : tab === "Completed" ? "completed" : "full";
 			let bar = document.querySelector(".rr-toolbar");
-			if (bar && bar.dataset.mode !== mode) {
-				bar.remove();
-				bar = null;
-			}
+			if (bar && bar.dataset.mode !== mode) { bar.remove(); bar = null; }
 			const allowed = gateOnly ?
 				!!listContainer() :
 				tab === "Recruiting" || tab === "Planning" || tab === "Completed";
-			if (!allowed) {
-				bar?.remove();
-				return;
-			}
+			if (!allowed) { bar?.remove(); return; }
 			if (bar) {
 				if (gateOnly) {
 					const c = bar.querySelector(".rr-auth-state");
@@ -1780,38 +1159,12 @@
 			if (!list) return;
 			bar = el("div", "rr-toolbar");
 			bar.dataset.mode = mode;
-			bar.innerHTML = mode === "gate" ?
-				`
-        <span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
-		<span class="rr-auth-state"></span>
-		<button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-	  ` : mode === "completed" ?
-				`
-		<span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
-		<span class="rr-right">
-		  <button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-		</span>
-	  ` :
-				`
-        <span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>
-        <span class="rr-count"></span>
-        <span class="rr-legend">
-          <span><i style="background:#029e7a"></i>Eligible</span>
-          <span><i style="background:#db7b2b"></i>Close</span>
-          <span><i style="background:#cc3232"></i>Below</span>
-          <span><i style="background:#6a6a6a"></i>No data</span>
-        </span>
-        <span class="rr-right">
-          <select class="rr-sort">
-            <option value="default">Sort: default</option>
-            <option value="success-desc">Success ↓</option>
-            <option value="success-asc">Success ↑</option>
-            <option value="level-desc">Level ↓</option>
-            <option value="level-asc">Level ↑</option>
-          </select>
-		  <button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>
-        </span>
-      `;
+			// The count line also says how many OCs were left out of the analysis, on every tab.
+			const gearHtml = `<button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>`;
+			bar.innerHTML = `<span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>` + (mode === "gate" ? `<span class="rr-auth-state"></span>${gearHtml}` :
+				`<span class="rr-count"></span>` + (mode === "completed" ? `<span class="rr-right">${gearHtml}</span>` :
+					`<span class="rr-legend">${LEGEND.map(([colour, label]) => `<span><i style="background:${colour}"></i>${label}</span>`).join("")}</span>` +
+					`<span class="rr-right"><select class="rr-sort">${SORT_OPTIONS.map(v => `<option value="${v}">${SORT_LABELS[v]}</option>`).join("")}</select>${gearHtml}</span>`));
 			list.before(bar);
 			if (mode === "gate") {
 				bar.querySelector(".rr-auth-state").textContent = this.gateMessage();
@@ -1824,11 +1177,7 @@
 				});
 			}
 			const gear = bar.querySelector(".rr-gear");
-			const onGear = event => {
-				event.preventDefault();
-				event.stopPropagation();
-				openSettings(gear);
-			};
+			const onGear = event => { event.preventDefault(); event.stopPropagation(); openSettings(gear); };
 			gear.addEventListener("mousedown", onGear);
 			gear.addEventListener("click", onGear);
 		},
@@ -1842,17 +1191,15 @@
 		for (const panel of panels) {
 			if (sorting && panel.getAttribute("aria-busy") === "true") continue;
 			const i = Analysis.result?.order.indexOf(panel.getAttribute("data-oc-id")) ?? -1;
-			panel.style.order = sorting && i >= 0 ? String(i) : "";
+			panel.style.order = sorting ? String(i >= 0 ? i : MAX_PANELS) : "";
 		}
 		const countEl = document.querySelector(".rr-count");
-		if (countEl && !Analysis.result) {
-			const text = Analysis.nextTryAt > nowMs() ? "Analysis unavailable; retrying..." : "Loading decisions...";
+		if (countEl) {
+			const n = Analysis.result?.joinable, left = Analysis.skipped ? ` · ${Analysis.skipped} not analysed` : "";
+			const text = Analysis.rejected ? "Analysis rejected – update the script" :
+				!Analysis.result ? (Analysis.nextTryAt > nowMs() ? "Analysis unavailable; retrying..." : "Loading decisions...") :
+				Analysis.error ? "Decision refresh unavailable; retrying..." : `${panels.length} OCs${n ? ` · ${n} joinable` : ""}${left}`;
 			if (countEl.textContent !== text) countEl.textContent = text;
-		}
-		if (countEl && Analysis.result) {
-			const n = Analysis.result.joinable;
-			const txt = Analysis.error ? "Decision refresh unavailable; retrying..." : `${panels.length} OCs${n ? ` · ${n} joinable` : ""}`;
-			if (countEl.textContent !== txt) countEl.textContent = txt;
 		}
 	}
 
@@ -1860,24 +1207,45 @@
 
 	// #region Panel Processing
 
-	// ============================ PER-PANEL PROCESSING ============================
+	const clip = (v) => typeof v === "string" ? v.slice(0, 160) : "";
+	const digits = (v) => typeof v === "string" && /^\d{1,20}$/.test(v) ? v : null;
+	const byteLength = (text) => new TextEncoder().encode(text).length;
+
+	// One OC as the server reads it, trimmed to the server's limits so one odd panel cannot void the
+	// whole request. The slot icon is sent only as the failure marker the server looks for.
 	function panelInput(info) {
+		if (!digits(info.ocId)) return null;
 		const crime = FactionCrimes.byId?.[info.ocId];
-		return { ocId: info.ocId, title: info.title, slug: info.slug, level: info.level,
-			crime: crime ? { status: crime.status, slots: (crime.slots || []).map(s => ({ position: s.position, item_requirement: s.item_requirement })) } : null,
+		const item = (r) => r && typeof r === "object" ? { is_available: typeof r.is_available === "boolean" ? r.is_available : null } : null;
+		return { ocId: info.ocId, title: clip(info.title), slug: info.slug ? clip(info.slug) : null,
+			level: Number.isFinite(info.level) && info.level >= 0 && info.level <= 100 ? info.level : 0,
+			crime: crime ? { status: clip(String(crime.status ?? "")), slots: (Array.isArray(crime.slots) ? crime.slots : []).slice(0, 20)
+				.map(s => ({ position: clip(String(s?.position ?? "")), item_requirement: item(s?.item_requirement) })) } : null,
 			hasCrimes: FactionCrimes.byId !== null,
-			slots: info.slots.map(s => ({ role: s.role, chance: s.chance, xid: s.xid || null,
-				domFailed: !!s.wrap.closest(sel("failed")), glyph: s.xid && !s.wrap.querySelector(sel("planning")) ? s.wrap.querySelector(sel("slotIcon"))?.innerHTML || "" : "" })) };
+			slots: info.slots.slice(0, 20).map(s => {
+				const icon = s.xid && !s.wrap.querySelector(sel("planning")) ? s.wrap.querySelector(sel("slotIcon"))?.innerHTML || "" : "";
+				return { role: clip(s.role), chance: s.chance !== null && s.chance >= 0 && s.chance <= 100 ? s.chance : null, xid: digits(s.xid),
+					domFailed: !!s.wrap.closest(sel("failed")), glyph: /#ff794c/i.test(icon) && /3\.729/.test(icon) ? "#ff794c 3.729" : "" };
+			}) };
 	}
 
 	const Analysis = {
 		fingerprint: null, result: null, pending: null, nextTryAt: 0, error: false,
 		context: null, observations: new Map(),
-		reset() { this.fingerprint = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false; this.context = null; this.observations.clear(); },
+		rejected: null, // the request the server refused as invalid; it is not sent again
+		skipped: 0, // OCs on the page left out of the request (past the server's limits)
+		reset() {
+			this.fingerprint = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false;
+			this.context = null; this.observations.clear(); this.rejected = null; this.skipped = 0;
+		},
 		contextFor(input) { return JSON.stringify([location.href, input.tab, input.config, input.roles]); },
 		input(infos, tab) {
-			const panels = infos.map(panelInput);
-			const input = { tab, sort: Toolbar.state.sort, config: Config.data, roles: Success.roles, probabilities: {}, panels };
+			const panels = [], seen = new Set();
+			for (const info of infos) {
+				const panel = panelInput(info);
+				if (panel && !seen.has(panel.ocId) && panels.length < MAX_PANELS) { seen.add(panel.ocId); panels.push(panel); }
+			}
+			const input = { tab: tab === null ? null : clip(tab), sort: Toolbar.state.sort, config: Config.data, roles: Success.roles, probabilities: {}, panels: [] };
 			if (this.context === this.contextFor(input)) {
 				for (const panel of panels) {
 					if (this.observations.get(panel.ocId) !== JSON.stringify(panel)) continue;
@@ -1885,20 +1253,27 @@
 					if (key && Success.cache.has(key)) input.probabilities[key] = Success.cache.get(key);
 				}
 			}
+			// Within the server's size limit the first OCs are sent; any after them are left undecided.
+			let room = MAX_REQUEST_BYTES - byteLength(JSON.stringify(input));
+			for (const panel of panels) {
+				room -= byteLength(JSON.stringify(panel)) + 1;
+				if (room < 0) break;
+				input.panels.push(panel);
+			}
+			this.skipped = infos.length - input.panels.length;
 			return input;
 		},
 		reconcile(infos, input) {
 			if (!this.result) return;
 			const sameContext = this.context === this.contextFor(input);
 			const keep = new Set();
-			input.panels.forEach((panel, i) => {
-				if (sameContext && this.observations.get(panel.ocId) === JSON.stringify(panel)) keep.add(panel.ocId);
-				else {
-					const before = this.observations.get(panel.ocId);
-					const requirements = p => JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]);
-					clearPanelDecision(infos[i].panel, sameContext && !!before && requirements(JSON.parse(before)) === requirements(panel));
-				}
-			});
+			const requirements = p => JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]);
+			for (const panel of input.panels) {
+				if (sameContext && this.observations.get(panel.ocId) === JSON.stringify(panel)) { keep.add(panel.ocId); continue; }
+				const before = this.observations.get(panel.ocId);
+				const same = sameContext && !!before && requirements(JSON.parse(before)) === requirements(panel);
+				for (const info of infos) if (info.ocId === panel.ocId) clearPanelDecision(info.panel, same);
+			}
 			const panels = this.result.panels.filter(p => keep.has(p.ocId));
 			if (panels.length !== this.result.panels.length) {
 				this.result = panels.length ? { ...this.result, panels, order: this.result.order.filter(id => keep.has(id)), joinable: null } : null;
@@ -1910,8 +1285,11 @@
 			const input = this.input(infos, tab);
 			const fp = JSON.stringify(input);
 			this.reconcile(infos, input);
-			if (this.result && fp === this.fingerprint) { this.draw(infos, tab); return; }
-			if (this.pending || nowMs() < this.nextTryAt) return;
+			// Decisions already held stay drawn while a request is out, cooling down or refused.
+			if ((this.result && fp === this.fingerprint) || this.pending || nowMs() < this.nextTryAt || fp === this.rejected) {
+				this.draw(infos, tab);
+				return;
+			}
 			const gen = Gate.gen;
 			const token = Gate.token;
 			const page = location.href;
@@ -1920,16 +1298,21 @@
 			try {
 				const result = await requestJson({ method: "POST", url: AUTH_API + "/v1/oc/analyse", headers: { Authorization: `Bearer ${token}` }, body: input });
 				if (gen !== Gate.gen || !Gate.pass() || page !== location.href) return;
-				const current = qa(document, "div[data-oc-id]").map(parsePanel);
-				if (JSON.stringify(this.input(current, activeTab())) !== fp) return;
-				this.fingerprint = fp; this.result = result; this.error = false; this.nextTryAt = 0;
+				if (!result || !Array.isArray(result.panels) || !Array.isArray(result.order)) throw new Error("Invalid analysis response");
+				this.fingerprint = fp; this.result = result; this.error = false; this.nextTryAt = 0; this.rejected = null;
 				this.context = this.contextFor(input);
 				this.observations = new Map(input.panels.map(p => [p.ocId, JSON.stringify(p)]));
-				this.draw(current, tab);
+				// OCs that changed while the request was out lose their decision and are asked for again.
+				const current = qa(document, "div[data-oc-id]").map(parsePanel), tabNow = activeTab();
+				this.reconcile(current, this.input(current, tabNow));
+				this.draw(current, tabNow);
 			} catch (error) {
 				if (gen !== Gate.gen || page !== location.href) return;
 				if ((error.status === 401 || error.status === 403) && token !== Gate.token) return;
-				this.nextTryAt = nowMs() + Math.max(RETRY_MS, error.retryAfter || 0);
+				// A request the server refused as invalid is not sent again, and nothing is sent for a while.
+				const refused = error.status === 400 || error.status === 413;
+				this.nextTryAt = nowMs() + (refused ? REJECTED_RETRY_MS : Math.max(RETRY_MS, error.retryAfter || 0));
+				this.rejected = refused ? fp : null;
 				this.fingerprint = null; this.error = true;
 				if (error.status === 401 || error.status === 403) {
 					await denyProtected(error.status, gen, token);
@@ -1943,9 +1326,7 @@
 					this.draw(current, activeTab());
 					log("analysis unavailable", error); setTimeout(scheduleRender, this.nextTryAt - nowMs());
 				}
-			} finally {
-				if (this.pending === job) { this.pending = null; if (gen === Gate.gen) scheduleRender(); }
-			}
+			} finally { if (this.pending === job) { this.pending = null; if (gen === Gate.gen) scheduleRender(); } }
 		},
 		draw(infos, tab) {
 			if (!this.result || !Gate.pass()) return;
@@ -1975,7 +1356,6 @@
 
 	// #region Lifecycle
 
-	// ============================ MAIN LOOP / ENTRY POINT ============================
 	function renderAll(force = false) {
 		if (!apiKeyLoaded) return;
 		const tab = safe("tab", activeTab, null);
@@ -1987,10 +1367,10 @@
 			return;
 		}
 		safe("config", () => Config.ensure()); // proprietary config only fetched once verified
+		const crimesRoot = document.querySelector("#faction-crimes-root");
+		if (crimesRoot && crimesRoot.getAttribute("translate") !== "no") crimesRoot.setAttribute("translate", "no");
 		const panels = qa(document, "div[data-oc-id]");
-		if (force) {
-			panels.forEach((p) => delete p.dataset.rrFp);
-		}
+		if (force) { panels.forEach((p) => delete p.dataset.rrFp); }
 		const live = new Set(panels.map((p) => p.getAttribute("data-oc-id")));
 		for (const [ocId, rec] of panelNodes) {
 			if (!live.has(ocId) && !rec.info?.isConnected) panelNodes.delete(ocId);
@@ -2007,19 +1387,14 @@
 		nowMs(); // notices a PC clock change even while the tab is hidden
 		if (document.hidden || !Gate.pass() || !Analysis.result) return;
 		const tab = safe("tab", activeTab, null);
-		if (tab !== "Planning" && tab !== "Recruiting" && tab !== "Completed") {
-			return;
-		}
+		if (tab !== "Planning" && tab !== "Recruiting" && tab !== "Completed") { return; }
 		// Keep member status and crime data on the server's cadence even while Torn's page is still.
 		safe("torn-api", () => TornApi.refresh());
 		safe("faction-crimes", () => FactionCrimes.refresh());
 		const onCompleted = tab === "Completed";
 		for (const header of qa(document, `div[data-oc-id] ${sel("slotHeader")}`)) {
 			const profile = q(header.parentElement, 'a[href*="profiles.php?XID="]');
-			const s = {
-				wrap: header.parentElement,
-				xid: profile ? profile.href.match(/XID=(\d+)/)?.[1] : null,
-			};
+			const s = { wrap: header.parentElement, xid: profile ? profile.href.match(/XID=(\d+)/)?.[1] : null };
 			safe("tick-cp", () => renderCheckpoint(s));
 			safe("tick-icon", () => renderStatusIcon(s, onCompleted));
 		}
@@ -2030,83 +1405,64 @@
 	function scheduleRender() {
 		if (scheduled) return;
 		scheduled = true;
-		setTimeout(() => {
-			scheduled = false;
-			safe("render", renderAll);
-		}, RENDER_DEBOUNCE_MS);
-	}
-
-	// Cached server results can restore remounted panels without another request.
-
-	function syncPanels() {
-		if (Gate.pass()) scheduleRender();
+		setTimeout(() => { scheduled = false; safe("render", renderAll); }, RENDER_DEBOUNCE_MS);
 	}
 
 	safe("init", () => {
 		if (window.__rrOcAutopilot) return; // guard against double injection (PDA re-navigation)
-		window.__rrOcAutopilot = true;
-
-		const style = document.createElement("style");
-		style.id = "rr-oc-style";
-		style.textContent = STYLE;
-		document.head.appendChild(style);
-		const root =
-			document.querySelector("#faction-crimes-root") || document.body;
-		new MutationObserver((muts) => {
-			// A slot header losing its rr-role marker means React rewrote its class in place; invalidate the fingerprint so syncPanels reapplies it this same tick.
-			for (const mut of muts) {
-				if (mut.type !== "attributes") continue;
-				const t = mut.target;
-				if (
-					t.matches?.(sel("slotHeader")) &&
-					!t.classList.contains("rr-role")
-				) {
-					t.closest("div[data-oc-id]")?.removeAttribute("data-rr-fp");
+		const start = () => {
+			if (window.__rrOcAutopilot || !document.body || !document.head) return;
+			const style = document.createElement("style");
+			style.id = "rr-oc-style";
+			style.textContent = STYLE;
+			document.head.appendChild(style);
+			const rootObserver = new MutationObserver((muts) => {
+				// A slot header losing its rr-role marker means React rewrote its class in place; invalidate the fingerprint so the next render reapplies it.
+				for (const mut of muts) {
+					if (mut.type !== "attributes") continue;
+					const t = mut.target;
+					if (t.matches?.(sel("slotHeader")) && !t.classList.contains("rr-role")) { t.closest("div[data-oc-id]")?.removeAttribute("data-rr-fp"); }
 				}
-			}
-			safe("guard", guardPresence);
-			safe("resync", syncPanels);
-			scheduleRender();
-		}).observe(root, {
-			childList: true,
-			subtree: true,
-			attributes: true,
-			attributeFilter: ["class"],
-		});
-		new MutationObserver((muts) => {
-			for (const mut of muts) {
-				for (const n of mut.removedNodes) {
-					if (n instanceof Element && !n.isConnected) restoreNativeEdits(n);
-				}
-				for (const n of mut.addedNodes) {
-					const tip = tooltipNode(n);
-					if (tip) safe("tooltip", () => augmentTooltip(tip));
-				}
-			}
-		}).observe(document.body, {
-			childList: true,
-			subtree: true
-		});
-		window.addEventListener("hashchange", () =>
-			setTimeout(() => safe("render", () => renderAll(true)), 300),
-		);
-		safe("config", () => Config.load());
-		setInterval(() => safe("tick", tickLive), 1000);
-		void loadApiKey()
-			.then(() => {
-				apiKeyLoaded = true;
-				Gate.reset();
-				renderAll();
-				safe("setup", promptForApiKey);
-			})
-			.catch(() => {
-				apiKeyLoaded = true;
-				authApiKey = "";
-				Gate.reset();
-				Gate.state = "denied";
-				onGateChange();
-				safe("setup", promptForApiKey);
+				safe("guard", guardPresence);
+				scheduleRender();
 			});
+			// Torn can replace the crimes root when the faction page changes tab: the watcher follows it.
+			let watched = null;
+			const watchRoot = () => {
+				const root = document.querySelector("#faction-crimes-root") || document.body;
+				if (root === watched) return;
+				rootObserver.disconnect();
+				rootObserver.observe(root, { childList: true, subtree: true, attributes: true, attributeFilter: ["class"] });
+				if (watched) scheduleRender();
+				watched = root;
+			};
+			watchRoot();
+			new MutationObserver((muts) => {
+				for (const mut of muts) {
+					for (const n of mut.removedNodes) { if (n instanceof Element && !n.isConnected) restoreNativeEdits(n); }
+					for (const n of mut.addedNodes) {
+						const tip = tooltipNode(n);
+						if (tip) safe("tooltip", () => augmentTooltip(tip));
+					}
+				}
+			}).observe(document.body, { childList: true, subtree: true });
+			window.addEventListener("hashchange", () => setTimeout(() => safe("render", () => renderAll(true)), 300));
+			setInterval(() => { safe("watch", watchRoot); safe("tick", tickLive); }, 1000);
+			window.__rrOcAutopilot = true;
+			void loadApiKey()
+				.then(() => { apiKeyLoaded = true; Gate.reset(); renderAll(); safe("setup", promptForApiKey); })
+				.catch(() => {
+					apiKeyLoaded = true;
+					authApiKey = "";
+					Gate.reset();
+					Gate.state = "denied";
+					onGateChange();
+					safe("setup", promptForApiKey);
+				});
+		};
+		// Some script managers run scripts before the page has a <body>: start once it has one.
+		if (document.body && document.head) start();
+		else document.addEventListener("DOMContentLoaded", () => safe("init", start), { once: true });
 	});
 
 	// #endregion
