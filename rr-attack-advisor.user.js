@@ -1,13 +1,15 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.7
+// @version      4.1.8
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
 // @downloadURL  https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
 // @match        https://www.torn.com/page.php?sid=attack*
 // @match        https://www.torn.com/loader.php?sid=attack*
+// @match        https://www.torn.com/page.php?*&sid=attack*
+// @match        https://www.torn.com/loader.php?*&sid=attack*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -41,18 +43,17 @@
 
     const STORAGE_SLOT = 'torn-attack-slot';
     const STORAGE_TYPE = 'torn-attack-type';
-    const STORAGE_KEY = 'torn-attack-api-key';              // Legacy localStorage key, migration only
+    const LEGACY_KEYS = ['torn-attack-api-key', 'torn-attack-jwt'];  // old page-readable key/token copies, deleted
     const SECURE_STORAGE_KEY = 'torn-attack-api-key-v2';
     const SESSION_STORAGE_KEY = 'rr-attack-session-v1';
-    const STORAGE_JWT = 'torn-attack-jwt';                  // Legacy cache, removed on startup
-    const STORAGE_WAR = 'torn-attack-war';                  // {ourFaction, oppId, roster, at}
-    const STORAGE_LIMITS = 'torn-attack-limits';            // {payload, at}
-    const STORAGE_SETTINGS = 'torn-attack-settings';        // {v, advisor, buttons, outcome, loglinks}
+    const ZZ_STORAGE_KEY = 'rr-attack-zz-v1';               // {keyHash, token} ZZCraft login, kept between attacks
+    const LIMITS_STORAGE_KEY = 'rr-attack-limits-v1';       // {playerId, payload, at, nextAt, validUntil}
+    const STORAGE_WAR = 'torn-attack-war';                  // {factionId, war: {ranked, at}, roster: {oppId, ids, at}}
+    const STORAGE_SETTINGS = 'torn-attack-settings';        // {advisor, buttons, outcome, loglinks}
 
     // War limits and Start Fight blocking are deliberately NOT in here - they
     // are a faction requirement and have no toggle path.
     const SETTINGS_DEFAULTS = {
-        v: 1,
         advisor: true,                                      // bonus chips + slot tags + temp verdict
         buttons: true,                                      // desktop dialog reposition + frame hide
         outcome: true,                                      // leave/mug/hosp filtering
@@ -61,7 +62,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.7';                                // keep in step with @version above
+    const VERSION = '4.1.8';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -82,6 +83,14 @@
     const POLL_MAX = 5 * 60 * 1000;                         // stop an idle page drifting
     const STALE_AFTER = 30 * 1000;                          // limits figure goes amber past this
     const RETRY_NET = 60 * 1000;                            // back off after a transient failure
+    const RETRY_QUICK = 5 * 1000;                           // a network failure retries soon: it pauses war hits
+    const WAR_KEEP = 60 * 60 * 1000;                        // last good war data stays usable while refreshes fail
+    const LIMITS_KEEP = 60 * 1000;                          // limits stay usable this long past ZZCraft's next update
+    const HOLD_GRACE = 10 * 1000;                           // an allowed verdict covers its own renewal this long
+    const RENEW_LEAD = 3 * 1000;                            // a decision is renewed this long before it runs out
+    const REJECTED_RETRY = 10 * 60 * 1000;                  // a key or request refused outright is retried after this
+    const STORAGE_TIMEOUT = 10 * 1000;                      // protected storage that does not answer counts as failed
+    const LOCK_TIMEOUT = 30 * 1000;                         // another tab's login is not waited for longer than this
 
     // Torn's header labels, discriminated by the icon SVG's viewBox - the label
     // count swings across fight phases and the class strings are identical, so
@@ -92,12 +101,7 @@
         '0 0 16 17': 'chain'
     };
 
-    const SLOT = {
-        PRIMARY: 1,
-        SECONDARY: 2,
-        MELEE: 3,
-        TEMP: 4
-    };
+    const SLOT = { PRIMARY: 1, SECONDARY: 2, MELEE: 3, TEMP: 4 };
 
     const SLOT_NAMES = {
         [SLOT.PRIMARY]: 'Primary',
@@ -106,17 +110,9 @@
         [SLOT.TEMP]: 'Temp'
     };
 
-    const ATTACK = {
-        LEAVE: 1,
-        MUG: 2,
-        HOSP: 3
-    };
+    const ATTACK = { LEAVE: 1, MUG: 2, HOSP: 3 };
 
-    const ATTACK_NAMES = {
-        [ATTACK.LEAVE]: 'Leave',
-        [ATTACK.MUG]: 'Mug',
-        [ATTACK.HOSP]: 'Hosp'
-    };
+    const ATTACK_NAMES = { [ATTACK.LEAVE]: 'Leave', [ATTACK.MUG]: 'Mug', [ATTACK.HOSP]: 'Hosp' };
     const OUTCOME_LABELS = ['leave', 'mug', 'hospitalize'];
     const START_LABELS = ['start fight', 'start', 'fight', 'attack'];
 
@@ -192,9 +188,7 @@
 
     // #region Storage
 
-    function storeGet(key) {
-        try { return localStorage.getItem(key); } catch (e) { return null; }
-    }
+    function storeGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
 
     function storeSet(key, value) {
         try { localStorage.setItem(key, value); } catch (e) { /* private mode / PDA */ }
@@ -204,75 +198,53 @@
         try { localStorage.removeItem(key); } catch (e) { /* private mode / PDA */ }
     }
 
-    async function secureGet(key) {
-        const onPda = typeof PAGE.flutter_inappwebview !== 'undefined';
-        if (onPda) {
-            if (typeof PDA_storage === 'undefined') {
-                throw new Error('TornPDA 3.15 or newer is required');
-            }
-            return await PDA_storage.get(key, null);
+    // Settles as p does, or fails after ms, so a store or lock that never answers cannot hold a flag.
+    function withTimeout(p, ms, what) {
+        let timer;
+        const late = new Promise((_, reject) => { timer = setTimeout(() => reject(new Error(what + ' timeout')), ms); });
+        return Promise.race([p, late]).finally(() => clearTimeout(timer));
+    }
+
+    // Protected storage: TornPDA's own store, else the script manager's (GM_* or GM.*). A store that
+    // does not answer within STORAGE_TIMEOUT counts as failed.
+    function protectedStore() {
+        if (typeof PAGE.flutter_inappwebview !== 'undefined') {
+            if (typeof PDA_storage === 'undefined') throw new Error('TornPDA 3.15 or newer is required');
+            return { get: k => PDA_storage.get(k, null), set: (k, v) => PDA_storage.set(k, v), del: k => PDA_storage.delete(k) };
         }
-        if (typeof GM_getValue === 'function') return await Promise.resolve(GM_getValue(key, null));
+        if (typeof GM_getValue === 'function') {
+            return { get: k => GM_getValue(k, null), set: (k, v) => GM_setValue(k, v), del: k => typeof GM_deleteValue === 'function' && GM_deleteValue(k) };
+        }
         if (typeof GM !== 'undefined' && GM && typeof GM.getValue === 'function') {
-            return await GM.getValue(key, null);
+            return { get: k => GM.getValue(k, null), set: (k, v) => GM.setValue(k, v), del: k => GM.deleteValue(k) };
         }
         return null;
     }
+    const timedStore = op => withTimeout(Promise.resolve().then(op), STORAGE_TIMEOUT, 'storage');
+
+    async function secureGet(key) { const store = protectedStore(); return store ? timedStore(() => store.get(key)) : null; }
 
     async function secureSet(key, value) {
-        const onPda = typeof PAGE.flutter_inappwebview !== 'undefined';
-        if (onPda) {
-            if (typeof PDA_storage === 'undefined') {
-                throw new Error('TornPDA 3.15 or newer is required');
-            }
-            await PDA_storage.set(key, value);
-            return;
-        }
-        if (typeof GM_setValue === 'function') {
-            await Promise.resolve(GM_setValue(key, value));
-            return;
-        }
-        if (typeof GM !== 'undefined' && GM && typeof GM.setValue === 'function') {
-            await GM.setValue(key, value);
-            return;
-        }
-        throw new Error('Protected userscript storage unavailable');
+        const store = protectedStore();
+        if (!store) throw new Error('Protected userscript storage unavailable');
+        await timedStore(() => store.set(key, value));
     }
 
     async function secureDelete(key) {
-        const onPda = typeof PAGE.flutter_inappwebview !== 'undefined';
-        if (onPda) {
-            if (typeof PDA_storage === 'undefined') return;
-            await PDA_storage.delete(key);
-            return;
-        }
-        if (typeof GM_deleteValue === 'function') {
-            await Promise.resolve(GM_deleteValue(key));
-            return;
-        }
-        if (typeof GM !== 'undefined' && GM && typeof GM.deleteValue === 'function') {
-            await GM.deleteValue(key);
-        }
+        let store = null;
+        try { store = protectedStore(); } catch (e) { return; }
+        if (store) await timedStore(() => store.del(key));
     }
 
     let authApiKey = '';
     let playerId = null;
     let apiKeyLoaded = false;
 
+    // Only read here, never rewritten, so one failed storage write cannot lose a saved key.
     async function loadApiKey() {
-        let candidate = await secureGet(SECURE_STORAGE_KEY);
-        if (!validKey(candidate)) candidate = storeGet(STORAGE_KEY);
-
-        if (validKey(candidate)) {
-            await secureSet(SECURE_STORAGE_KEY, candidate);
-            if ((await secureGet(SECURE_STORAGE_KEY)) !== candidate) {
-                throw new Error('API key migration could not be verified');
-            }
-            authApiKey = candidate;
-        } else {
-            authApiKey = '';
-        }
-        storeDel(STORAGE_KEY);
+        const candidate = await secureGet(SECURE_STORAGE_KEY);
+        authApiKey = validKey(candidate) ? candidate : '';
+        LEGACY_KEYS.forEach(storeDel);
     }
 
     async function saveApiKey(value) {
@@ -282,16 +254,11 @@
             if ((await secureGet(SECURE_STORAGE_KEY)) !== value) {
                 throw new Error('API key save could not be verified');
             }
-        } else {
-            await secureDelete(SECURE_STORAGE_KEY);
-        }
+        } else { await secureDelete(SECURE_STORAGE_KEY); }
         authApiKey = value;
-        storeDel(STORAGE_KEY);
     }
 
-    function jsonGet(key) {
-        try { return JSON.parse(storeGet(key) || 'null'); } catch (e) { return null; }
-    }
+    function jsonGet(key) { try { return JSON.parse(storeGet(key) || 'null'); } catch (e) { return null; } }
 
     function jsonSet(key, value) {
         try { storeSet(key, JSON.stringify(value)); } catch (e) { /* quota / cycles */ }
@@ -314,9 +281,7 @@
 
     const settings = { ...SETTINGS_DEFAULTS, ...(jsonGet(STORAGE_SETTINGS) || {}) };
 
-    function saveSettings() {
-        jsonSet(STORAGE_SETTINGS, settings);
-    }
+    function saveSettings() { jsonSet(STORAGE_SETTINGS, settings); }
 
     let styleEl = null;
     let styleKey = '';
@@ -365,453 +330,131 @@
     //   so phone rotation reacts without a stylesheet rebuild.
     function buildCss() {
         const dialogHide = `
-        ${sel('dialogWrapper')}[data-txm-dialog="start"],
-        ${sel('dialogWrapper')}[data-txm-dialog="outcome"] { visibility: hidden; }
-        ${sel('dialogWrapper')}[data-txm-dialog] ${sel('dialogButtons')} { visibility: visible; }
+            ${sel('dialogWrapper')}[data-txm-dialog="start"], ${sel('dialogWrapper')}[data-txm-dialog="outcome"] { visibility: hidden; }
+            ${sel('dialogWrapper')}[data-txm-dialog] ${sel('dialogButtons')} { visibility: visible; }
         `;
 
         // Buttons move only on desktop and Torn's forced "Desktop View".
         // True Mobile View keeps Torn's native dialog and button placement.
         const positioning = !Session.pass() || !settings.buttons || compact() ? '' : `
-        ${sel('player')}:nth-child(2) ${sel('playerWindow')} {
-            overflow: visible;
-        }
-
-        ${sel('dialogButtons')} {
-            z-index: 1000;
-            position: absolute;
-            top: ${getTopStyle(slot)};
-            display: flex;
-            left: -300px;
-            width: 420px;
-            justify-content: center;
-            flex-direction: row !important;
-        }
-        ${dialogHide}
+            ${sel('player')}:nth-child(2) ${sel('playerWindow')} { overflow: visible; }
+            ${sel('dialogButtons')} { z-index: 1000; position: absolute; top: ${getTopStyle(slot)}; display: flex; left: -300px; width: 420px; justify-content: center; flex-direction: row !important; }
+            ${dialogHide}
         `;
 
         return `
-        ${sel('modelWrap')} { max-width: 100%; }
-        ${positioning}
-
-        [data-txm-hide] { display: none !important; }
-
-        .txm-fa-namelink { color: var(--default-color); }
-
-        .txm-fastattack {
-            display: flex;
-            align-items: center;
-            gap: 8px;
-            margin-top: 6px;
-            font-size: 12px;
-        }
-
-        .txm-fastattack select {
-            background: #1f1f1f;
-            color: #e6e6e6;
-            border: 1px solid #444;
-            border-radius: 4px;
-            padding: 2px 6px;
-            cursor: pointer;
-        }
-
-        .txm-fastattack select:hover {
-            border-color: #777;
-        }
-
-        [data-txm-warn], [data-txm-disarm] { position: relative; }
-
-        [data-txm-warn]::after,
-        [data-txm-disarm]::before {
-            position: absolute;
-            right: 4px;
-            bottom: 26px;
-            padding: 1px 4px;
-            border-radius: 2px;
-            font-size: 8px;
-            font-weight: 700;
-            line-height: 1.2;
-            background: rgba(0, 0, 0, .55);
-            pointer-events: none;
-            z-index: 5;
-        }
-
-        [data-txm-warn]::after { content: attr(data-txm-label); }
-        [data-txm-disarm]::before { content: attr(data-txm-disarm-label); color: #e0a80d; }
-        [data-txm-warn][data-txm-disarm]::before { bottom: 41px; }
-
-        [data-txm-warn="avoid"]::after { color: #d63b3b; }
-
-        .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('topSection')},
-        .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('delimiter')},
-        .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('bottomSection')} {
-            display: none !important;
-        }
-
-        .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} {
-            margin: 0 !important;
-            padding: 0 !important;
-            border: 0 !important;
-            min-height: 0 !important;
-        }
-
-        .txm-fa-bar {
-            display: flex;
-            flex-direction: column;
-            gap: 6px;
-            margin: 8px 0;
-            padding: 8px 12px;
-            background: #1f1f1f;
-            border: 1px solid rgba(2, 158, 122, .5);
-            border-radius: 6px;
-            font-size: 12px;
-            color: #ddd;
-        }
-
-        .txm-fa-row {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .txm-fa-brand {
-            color: #029e7a;
-            font-weight: 700;
-            letter-spacing: 1.5px;
-            white-space: nowrap;
-        }
-
-        .txm-fa-brand small {
-            color: #8a8a8a;
-            font-weight: 600;
-            letter-spacing: 1px;
-            margin-left: 4px;
-        }
-
-        .txm-fa-auth-state {
-            color: #8a8a8a;
-            font-size: 11px;
-            margin-left: auto;
-        }
-
-        .txm-fa-chips {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .txm-fa-chip {
-            display: inline-flex;
-            align-items: center;
-            gap: 4px;
-            padding: 2px 8px;
-            background: #2a2a2a;
-            border: 1px solid #444;
-            border-radius: 4px;
-            font-size: 11px;
-            white-space: nowrap;
-        }
-
-        .txm-fa-chip b { font-weight: 700; }
-        .txm-fa-chip em { font-style: normal; color: #8a8a8a; }
-
-        .txm-fa-ico { display: inline-flex; align-items: center; }
-        .txm-fa-ico svg { width: 11px; height: 12px; opacity: .75; }
-        .txm-fa-ico svg, .txm-fa-ico svg path { fill: currentColor; }
-
-        .txm-fa-chip[data-kind="chain"][data-low="1"] { border-color: #e74c3c; }
-        .txm-fa-chip[data-kind="chain"][data-low="1"] em { color: #e74c3c; }
-
-        .txm-fa-right {
-            margin-left: auto;
-            display: flex;
-            gap: 8px;
-            align-items: center;
-            flex-wrap: wrap;
-        }
-
-        .txm-fa-escape {
-            background: transparent;
-            border: 1px solid #029e7a;
-            color: #029e7a;
-            border-radius: 4px;
-            padding: 3px 10px;
-            cursor: pointer;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 1px;
-            text-transform: uppercase;
-        }
-
-        .txm-fa-escape:hover:not(:disabled) { background: #029e7a; color: #fff; }
-        .txm-fa-escape:disabled { opacity: .45; cursor: default; border-color: #444; color: #8a8a8a; }
-
-        .txm-fa-back { color: #8a8a8a; font-size: 11px; text-decoration: none; white-space: nowrap; }
-        .txm-fa-back:hover { color: #029e7a; }
-
-        .txm-fa-bar .txm-fastattack { margin: 0; }
-        .txm-fa-bar .txm-fastattack label { display: inline-flex; align-items: center; gap: 4px; color: #8a8a8a; }
-
-        [data-txm-block] {
-            pointer-events: none !important;
-            opacity: .45 !important;
-            cursor: not-allowed !important;
-            filter: grayscale(1);
-        }
-
-        .txm-fa-info {
-            border-top: 1px solid #333;
-            padding-top: 6px;
-            font-size: 11px;
-        }
-
-        .txm-fa-advice, .txm-fa-limits, .txm-fa-warn {
-            display: flex;
-            flex-wrap: wrap;
-            gap: 8px;
-            align-items: center;
-        }
-
-        .txm-fa-limits, .txm-fa-warn { margin-left: auto; }
-
-        .txm-fa-warn {
-            color: #e74c3c;
-            font-weight: 700;
-            letter-spacing: .3px;
-        }
-
-        .txm-fa-dot {
-            width: 8px;
-            height: 8px;
-            border-radius: 50%;
-            background: #8a8a8a;
-            flex: none;
-        }
-
-        .txm-fa-adv[data-level="avoid"] .txm-fa-dot { background: #d63b3b; }
-        .txm-fa-adv[data-level="caution"] .txm-fa-dot { background: #e0a80d; }
-        .txm-fa-adv[data-level="ok"] .txm-fa-dot { background: #4caf50; }
-
-        .txm-fa-age { color: #6f6f6f; font-size: 10px; font-style: italic; white-space: nowrap; }
-
-        .txm-fa-api {
-            background: transparent;
-            border: 1px solid #029e7a;
-            color: #029e7a;
-            border-radius: 4px;
-            padding: 3px 10px;
-            cursor: pointer;
-            font-size: 11px;
-            font-weight: 700;
-            letter-spacing: 1px;
-        }
-
-        .txm-fa-api:hover { background: #029e7a; color: #fff; }
-        .txm-fa-api:disabled { opacity: .5; cursor: default; }
-
-        .txm-fa-gear {
-            background: none;
-            border: none;
-            color: #8a8a8a;
-            font-size: 15px;
-            line-height: 1;
-            padding: 0 4px;
-            cursor: pointer;
-        }
-
-        .txm-fa-gear:hover { color: #029e7a; }
-
-        .txm-fa-limits { color: #8a8a8a; }
-
-        .txm-fa-key { color: #029e7a; font-weight: 700; letter-spacing: 1px; }
-        .txm-fa-sep { color: #444; }
-        .txm-fa-lim { white-space: nowrap; }
-        .txm-fa-lim b { color: #ddd; font-weight: 700; }
-        .txm-fa-mine { margin-left: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-        .txm-fa-val { white-space: nowrap; font-weight: 700; color: #ddd; }
-        .txm-fa-bar .txm-fa-val[data-ok="1"] { color: #2ecc71; }
-        .txm-fa-bar .txm-fa-val[data-ok="0"] { color: #e74c3c; }
-        .txm-fa-bar .txm-fa-val[data-cap="1"] { color: #e0a80d; }
-        .txm-fa-bar .txm-fa-age[data-stale="1"] { color: #e0a80d; }
-
-        .txm-fa-bar [hidden] { display: none !important; }
-
-        body:not(.dark-mode) .txm-fa-bar { background: #f2f2f2; color: #333; }
-        body:not(.dark-mode) .txm-fa-chip { background: #fff; border-color: #ccc; }
-        body:not(.dark-mode) .txm-fa-chip em,
-        body:not(.dark-mode) .txm-fa-limits,
-        body:not(.dark-mode) .txm-fa-bar .txm-fastattack label { color: #666; }
-        body:not(.dark-mode) .txm-fa-bar .txm-fastattack select { background: #fff; color: #333; border-color: #ccc; }
-        body:not(.dark-mode) .txm-fa-info { border-top-color: #ddd; }
-        body:not(.dark-mode) .txm-fa-lim b,
-        body:not(.dark-mode) .txm-fa-val { color: #333; }
-        body:not(.dark-mode) .txm-fa-sep { color: #bbb; }
-        body:not(.dark-mode) .txm-fa-escape:disabled { color: #999; border-color: #ccc; }
-        body:not(.dark-mode) .txm-fa-age { color: #888; }
-
-        .txm-fa-set-overlay {
-            position: fixed;
-            inset: 0;
-            z-index: 999999;
-            background: rgba(0, 0, 0, .8);
-            backdrop-filter: blur(4px);
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .txm-fa-set-modal {
-            display: flex;
-            flex-direction: column;
-            width: min(520px, 94vw);
-            max-height: min(86vh, 700px);
-            overflow: hidden;
-            background: linear-gradient(180deg, #23252b, #1b1d22);
-            border: 1px solid rgba(2, 158, 122, .5);
-            border-radius: 8px;
-            box-shadow: 0 2px 10px rgba(0, 0, 0, .35);
-            color: #d7d9de;
-            font-size: 12px;
-        }
-
-        .txm-fa-set-head {
-            display: flex;
-            align-items: center;
-            justify-content: space-between;
-            gap: 12px;
-            padding: 12px 14px;
-            background: linear-gradient(180deg, #2c2f37, #23252b);
-            border-bottom: 1px solid #34373f;
-        }
-
-        .txm-fa-set-head b { color: #029e7a; letter-spacing: 1px; }
-
-        .txm-fa-set-close {
-            width: 28px;
-            height: 28px;
-            display: inline-flex;
-            align-items: center;
-            justify-content: center;
-            background: none;
-            border: none;
-            color: #8a8a8a;
-            font-size: 22px;
-            line-height: 1;
-            cursor: pointer;
-        }
-
-        .txm-fa-set-close:hover { color: #fff; }
-
-        .txm-fa-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
-
-        .txm-fa-set-tabs {
-            display: flex;
-            gap: 6px;
-            margin-bottom: 12px;
-            border-bottom: 1px solid #34373f;
-            padding-bottom: 8px;
-        }
-
-        .txm-fa-set-tab {
-            border: 1px solid #34373f;
-            border-radius: 5px;
-            background: #15161a;
-            color: #d7d9de;
-            font: inherit;
-            font-weight: 700;
-            min-height: 28px;
-            padding: 5px 12px;
-            cursor: pointer;
-        }
-
-        .txm-fa-set-tab:hover { border-color: #029e7a; color: #029e7a; }
-        .txm-fa-set-tab.active { background: #029e7a; border-color: #029e7a; color: #10231d; }
-
-        .txm-fa-set-section {
-            background: #1a1a1a;
-            border: 1px solid #34373f;
-            border-radius: 6px;
-            padding: 12px;
-            margin-bottom: 12px;
-        }
-
-        .txm-fa-set-title {
-            color: #8a8d96;
-            font-size: 10px;
-            font-weight: 700;
-            letter-spacing: .07em;
-            text-transform: uppercase;
-            margin-bottom: 10px;
-        }
-
-        .txm-fa-set-input {
-            width: 100%;
-            box-sizing: border-box;
-            background: #15161a;
-            color: #d7d9de;
-            border: 1px solid #34373f;
-            border-radius: 5px;
-            padding: 6px 8px;
-            font: inherit;
-            text-align: center;
-            letter-spacing: 2px;
-            margin-bottom: 10px;
-        }
-
-        .txm-fa-set-input:focus { border-color: #029e7a; outline: none; }
-        .txm-fa-set-input[data-bad="1"] { border-color: #e74c3c; }
-
-        .txm-fa-set-status {
-            text-align: center;
-            padding: 8px;
-            background: #15161a;
-            border: 1px solid #34373f;
-            border-radius: 5px;
-            font-size: 11px;
-            margin-bottom: 10px;
-        }
-
-        .txm-fa-set-status[data-state="ok"] { color: #2ecc71; }
-        .txm-fa-set-status[data-state="bad"] { color: #e74c3c; }
-        .txm-fa-set-status[data-state="wait"] { color: #e0a80d; }
-
-        .txm-fa-set-actions { display: flex; gap: 8px; }
-        .txm-fa-set-actions .txm-fa-api { flex: 1; }
-
-        .txm-fa-set-check {
-            display: flex;
-            align-items: flex-start;
-            gap: 10px;
-            padding: 8px;
-            background: #15161a;
-            border: 1px solid #34373f;
-            border-radius: 5px;
-            margin-bottom: 8px;
-            cursor: pointer;
-            font-size: 11px;
-        }
-
-        .txm-fa-set-check:hover { border-color: #029e7a; }
-        .txm-fa-set-check input { margin-top: 2px; }
-        .txm-fa-set-check b { color: #fff; }
-
-        .txm-fa-set-note { font-size: 10px; color: #8a8d96; }
-
-        @media (max-width: ${COMPACT_WIDTH}px) {
-            html:not(.html-manual-desktop) .txm-fa-bar { margin: 6px 0; padding: 6px 8px; gap: 4px; }
-            html:not(.html-manual-desktop) .txm-fa-row { gap: 6px; }
-            html:not(.html-manual-desktop) .txm-fa-brand small { display: none; }
-            html:not(.html-manual-desktop) .txm-fa-right,
-            html:not(.html-manual-desktop) .txm-fa-mine { margin-left: 0; }
-            html:not(.html-manual-desktop) .txm-fa-chip { padding: 2px 6px; }
-        }
-
-        @media (max-width: 560px) {
-            .txm-fa-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-            .txm-fa-set-modal { margin: auto; max-height: 92vh; }
-        }
+            ${sel('modelWrap')} { max-width: 100%; }
+            ${positioning}
+            [data-txm-hide] { display: none !important; }
+            .txm-fa-namelink { color: var(--default-color); }
+            .txm-fastattack { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; }
+            .txm-fastattack select { background: #1f1f1f; color: #e6e6e6; border: 1px solid #444; border-radius: 4px; padding: 2px 6px; cursor: pointer; }
+            .txm-fastattack select:hover { border-color: #777; }
+            [data-txm-warn], [data-txm-disarm] { position: relative; }
+            [data-txm-warn]::after, [data-txm-disarm]::before { position: absolute; right: 4px; bottom: 26px; padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 700; line-height: 1.2; background: rgba(0, 0, 0, .55); pointer-events: none; z-index: 5; }
+            [data-txm-warn]::after { content: attr(data-txm-label); }
+            [data-txm-disarm]::before { content: attr(data-txm-disarm-label); color: #e0a80d; }
+            [data-txm-warn][data-txm-disarm]::before { bottom: 41px; }
+            [data-txm-warn="avoid"]::after { color: #d63b3b; }
+            .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('topSection')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('delimiter')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('bottomSection')} { display: none !important; }
+            .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} { margin: 0 !important; padding: 0 !important; border: 0 !important; min-height: 0 !important; }
+            .txm-fa-bar { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 8px 12px; background: #1f1f1f; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; font-size: 12px; color: #ddd; }
+            .txm-fa-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+            .txm-fa-brand { color: #029e7a; font-weight: 700; letter-spacing: 1.5px; white-space: nowrap; }
+            .txm-fa-brand small { color: #8a8a8a; font-weight: 600; letter-spacing: 1px; margin-left: 4px; }
+            .txm-fa-auth-state { color: #8a8a8a; font-size: 11px; margin-left: auto; }
+            .txm-fa-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+            .txm-fa-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; font-size: 11px; white-space: nowrap; }
+            .txm-fa-chip b { font-weight: 700; }
+            .txm-fa-chip em { font-style: normal; color: #8a8a8a; }
+            .txm-fa-ico { display: inline-flex; align-items: center; }
+            .txm-fa-ico svg { width: 11px; height: 12px; opacity: .75; }
+            .txm-fa-ico svg, .txm-fa-ico svg path { fill: currentColor; }
+            .txm-fa-chip[data-kind="chain"][data-low="1"] { border-color: #e74c3c; }
+            .txm-fa-chip[data-kind="chain"][data-low="1"] em { color: #e74c3c; }
+            .txm-fa-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+            .txm-fa-escape { background: transparent; border: 1px solid #029e7a; color: #029e7a; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
+            .txm-fa-escape:hover:not(:disabled) { background: #029e7a; color: #fff; }
+            .txm-fa-escape:disabled { opacity: .45; cursor: default; border-color: #444; color: #8a8a8a; }
+            .txm-fa-back { color: #8a8a8a; font-size: 11px; text-decoration: none; white-space: nowrap; }
+            .txm-fa-back:hover { color: #029e7a; }
+            .txm-fa-bar .txm-fastattack { margin: 0; }
+            .txm-fa-bar .txm-fastattack label { display: inline-flex; align-items: center; gap: 4px; color: #8a8a8a; }
+            [data-txm-block] { pointer-events: none !important; opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
+            .txm-fa-info { border-top: 1px solid #333; padding-top: 6px; font-size: 11px; }
+            .txm-fa-advice, .txm-fa-limits, .txm-fa-warn { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+            .txm-fa-limits, .txm-fa-warn { margin-left: auto; }
+            .txm-fa-warn { color: #e74c3c; font-weight: 700; letter-spacing: .3px; }
+            .txm-fa-hold { color: #e0a80d; font-weight: 700; letter-spacing: .3px; margin-left: auto; }
+            .txm-fa-dot { width: 8px; height: 8px; border-radius: 50%; background: #8a8a8a; flex: none; }
+            .txm-fa-adv[data-level="avoid"] .txm-fa-dot { background: #d63b3b; }
+            .txm-fa-adv[data-level="caution"] .txm-fa-dot { background: #e0a80d; }
+            .txm-fa-adv[data-level="ok"] .txm-fa-dot { background: #4caf50; }
+            .txm-fa-age { color: #6f6f6f; font-size: 10px; font-style: italic; white-space: nowrap; }
+            .txm-fa-api { background: transparent; border: 1px solid #029e7a; color: #029e7a; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
+            .txm-fa-api:hover { background: #029e7a; color: #fff; }
+            .txm-fa-api:disabled { opacity: .5; cursor: default; }
+            .txm-fa-gear { background: none; border: none; color: #8a8a8a; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
+            .txm-fa-gear:hover { color: #029e7a; }
+            .txm-fa-limits { color: #8a8a8a; }
+            .txm-fa-key { color: #029e7a; font-weight: 700; letter-spacing: 1px; }
+            .txm-fa-sep { color: #444; }
+            .txm-fa-lim { white-space: nowrap; }
+            .txm-fa-lim b { color: #ddd; font-weight: 700; }
+            .txm-fa-mine { margin-left: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+            .txm-fa-val { white-space: nowrap; font-weight: 700; color: #ddd; }
+            .txm-fa-bar .txm-fa-val[data-ok="1"] { color: #2ecc71; }
+            .txm-fa-bar .txm-fa-val[data-ok="0"] { color: #e74c3c; }
+            .txm-fa-bar .txm-fa-val[data-cap="1"] { color: #e0a80d; }
+            .txm-fa-bar .txm-fa-age[data-stale="1"] { color: #e0a80d; }
+            .txm-fa-bar [hidden] { display: none !important; }
+            body:not(.dark-mode) .txm-fa-bar { background: #f2f2f2; color: #333; }
+            body:not(.dark-mode) .txm-fa-chip { background: #fff; border-color: #ccc; }
+            body:not(.dark-mode) .txm-fa-chip em, body:not(.dark-mode) .txm-fa-limits, body:not(.dark-mode) .txm-fa-bar .txm-fastattack label { color: #666; }
+            body:not(.dark-mode) .txm-fa-bar .txm-fastattack select { background: #fff; color: #333; border-color: #ccc; }
+            body:not(.dark-mode) .txm-fa-info { border-top-color: #ddd; }
+            body:not(.dark-mode) .txm-fa-lim b, body:not(.dark-mode) .txm-fa-val { color: #333; }
+            body:not(.dark-mode) .txm-fa-sep { color: #bbb; }
+            body:not(.dark-mode) .txm-fa-escape:disabled { color: #999; border-color: #ccc; }
+            body:not(.dark-mode) .txm-fa-age { color: #888; }
+            .txm-fa-set-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999999; background: rgba(0, 0, 0, .8); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; justify-content: center; align-items: center; }
+            .txm-fa-set-modal { display: flex; flex-direction: column; width: min(520px, 94vw); max-height: min(86vh, 700px); overflow: hidden; background: linear-gradient(180deg, #23252b, #1b1d22); border: 1px solid rgba(2, 158, 122, .5); border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); color: #d7d9de; font-size: 12px; }
+            .txm-fa-set-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; background: linear-gradient(180deg, #2c2f37, #23252b); border-bottom: 1px solid #34373f; }
+            .txm-fa-set-head b { color: #029e7a; letter-spacing: 1px; }
+            .txm-fa-set-close { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #8a8a8a; font-size: 22px; line-height: 1; cursor: pointer; }
+            .txm-fa-set-close:hover { color: #fff; }
+            .txm-fa-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
+            .txm-fa-set-tabs { display: flex; gap: 6px; margin-bottom: 12px; border-bottom: 1px solid #34373f; padding-bottom: 8px; }
+            .txm-fa-set-tab { border: 1px solid #34373f; border-radius: 5px; background: #15161a; color: #d7d9de; font: inherit; font-weight: 700; min-height: 28px; padding: 5px 12px; cursor: pointer; }
+            .txm-fa-set-tab:hover { border-color: #029e7a; color: #029e7a; }
+            .txm-fa-set-tab.active { background: #029e7a; border-color: #029e7a; color: #10231d; }
+            .txm-fa-set-section { background: #1a1a1a; border: 1px solid #34373f; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
+            .txm-fa-set-title { color: #8a8d96; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 10px; }
+            .txm-fa-set-input { width: 100%; box-sizing: border-box; background: #15161a; color: #d7d9de; border: 1px solid #34373f; border-radius: 5px; padding: 6px 8px; font: inherit; text-align: center; letter-spacing: 2px; margin-bottom: 10px; }
+            .txm-fa-set-input:focus { border-color: #029e7a; outline: none; }
+            .txm-fa-set-input[data-bad="1"] { border-color: #e74c3c; }
+            .txm-fa-set-status { text-align: center; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; font-size: 11px; margin-bottom: 10px; }
+            .txm-fa-set-status[data-state="ok"] { color: #2ecc71; }
+            .txm-fa-set-status[data-state="bad"] { color: #e74c3c; }
+            .txm-fa-set-status[data-state="wait"] { color: #e0a80d; }
+            .txm-fa-set-actions { display: flex; gap: 8px; }
+            .txm-fa-set-actions .txm-fa-api { flex: 1; }
+            .txm-fa-set-check { display: flex; align-items: flex-start; gap: 10px; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; margin-bottom: 8px; cursor: pointer; font-size: 11px; }
+            .txm-fa-set-check:hover { border-color: #029e7a; }
+            .txm-fa-set-check input { margin-top: 2px; }
+            .txm-fa-set-check b { color: #fff; }
+            .txm-fa-set-note { font-size: 10px; color: #8a8d96; }
+            @media (max-width: ${COMPACT_WIDTH}px) {
+                html:not(.html-manual-desktop) .txm-fa-bar { margin: 6px 0; padding: 6px 8px; gap: 4px; }
+                html:not(.html-manual-desktop) .txm-fa-row { gap: 6px; }
+                html:not(.html-manual-desktop) .txm-fa-brand small { display: none; }
+                html:not(.html-manual-desktop) .txm-fa-right, html:not(.html-manual-desktop) .txm-fa-mine { margin-left: 0; }
+                html:not(.html-manual-desktop) .txm-fa-chip { padding: 2px 6px; }
+            }
+            @media (max-width: 560px) {
+                .txm-fa-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
+                .txm-fa-set-modal { margin: auto; max-height: 92vh; }
+            }
         `;
     }
 
@@ -846,12 +489,15 @@
     // Attack buttons
 
     function filterOutcomeButtons() {
-        const buttons = qa(q(document, sel('dialogButtons')), 'button');
         const selected = OUTCOME_LABELS[attackType - 1];
-        buttons.forEach(b => {
-            const label = b.textContent.trim().toLowerCase();
-            if (Session.pass() && settings.outcome && selected && OUTCOME_LABELS.includes(label) && label !== selected) setAttr(b, 'data-txm-hide', '');
-            else delAttr(b, 'data-txm-hide');
+        qa(document, sel('dialogButtons')).forEach(box => {
+            const buttons = qa(box, 'button'), labels = buttons.map(b => b.textContent.trim().toLowerCase());
+            // Other outcomes are hidden only while the chosen one is on screen, so one always remains.
+            const on = Session.pass() && settings.outcome && labels.includes(selected);
+            buttons.forEach((b, i) => {
+                if (on && OUTCOME_LABELS.includes(labels[i]) && labels[i] !== selected) setAttr(b, 'data-txm-hide', '');
+                else delAttr(b, 'data-txm-hide');
+            });
         });
     }
 
@@ -955,17 +601,11 @@
     // Write-on-change only: the body observer filters attributes to ['class'],
     // so data-*/hidden writes never wake it; setText is the only helper that
     // emits an observed childList record, and only on real change.
-    function setAttr(el, name, value) {
-        if (el && el.getAttribute(name) !== value) el.setAttribute(name, value);
-    }
+    function setAttr(el, name, value) { if (el && el.getAttribute(name) !== value) el.setAttribute(name, value); }
 
-    function delAttr(el, name) {
-        if (el && el.hasAttribute(name)) el.removeAttribute(name);
-    }
+    function delAttr(el, name) { if (el && el.hasAttribute(name)) el.removeAttribute(name); }
 
-    function setText(el, value) {
-        if (el && el.textContent !== value) el.textContent = value;
-    }
+    function setText(el, value) { if (el && el.textContent !== value) el.textContent = value; }
 
     function setShown(el, on) {
         if (!el) return;
@@ -985,11 +625,7 @@
 
     function tagSlot(el, level, tag) {
         if (!el) return;
-        if (!level) {
-            delAttr(el, 'data-txm-warn');
-            delAttr(el, 'data-txm-label');
-            return;
-        }
+        if (!level) { delAttr(el, 'data-txm-warn'); delAttr(el, 'data-txm-label'); return; }
         setAttr(el, 'data-txm-warn', level);
         setAttr(el, 'data-txm-label', tag || '');
     }
@@ -998,11 +634,7 @@
     // a verdict tag and the disarm tag at the same time.
     function tagDisarm(el, on) {
         if (!el) return;
-        if (!on) {
-            delAttr(el, 'data-txm-disarm');
-            delAttr(el, 'data-txm-disarm-label');
-            return;
-        }
+        if (!on) { delAttr(el, 'data-txm-disarm'); delAttr(el, 'data-txm-disarm-label'); return; }
         setAttr(el, 'data-txm-disarm', '1');
         setAttr(el, 'data-txm-disarm-label', 'disarm');
     }
@@ -1032,7 +664,7 @@
     function syncInfoRow() {
         const bar = q(document, '.txm-fa-bar');
         if (!bar) return;
-        const any = qa(bar, '.txm-fa-advice, .txm-fa-limits, .txm-fa-warn')
+        const any = qa(bar, '.txm-fa-advice, .txm-fa-limits, .txm-fa-warn, .txm-fa-hold')
             .some(el => !el.hasAttribute('hidden'));
         setShown(q(bar, '.txm-fa-info'), any);
     }
@@ -1044,8 +676,6 @@
             const tag = advice && advice.tags[id];
             tagSlot(el, tag && tag.level, tag && tag.tag);
             tagDisarm(el, !!(advice && advice.disarmSlots.includes(id)));
-            delAttr(el, 'data-txm-temp');
-            delAttr(el, 'data-txm-helmet');
         });
         def.forEach(el => tagSlot(el, null));
         // Request failures are reported once in the shared warning row.
@@ -1096,16 +726,11 @@
                 out.count = m ? m[1] : text;
                 out.time = m ? m[2] : '';
                 out.low = !!q(t, sel('timeLow'));            // read that state class, never select on it
-            } else if (kind === 'escape') {
-                out.escape = q(el, 'button');
-            }
+            } else if (kind === 'escape') { out.escape = q(el, 'button'); }
         });
 
         const back = q(head, `${sel('linksContainer')} a[href]`);
-        if (back) {
-            out.backHref = back.getAttribute('href');
-            out.backText = back.textContent.trim();
-        }
+        if (back) { out.backHref = back.getAttribute('href'); out.backText = back.textContent.trim(); }
 
         // Torn's header is only hidden once we have proved we can reproduce it;
         // an empty header mid-remount still counts as mirrored.
@@ -1113,18 +738,30 @@
         return out;
     }
 
-    function buildBar(head, mount) {
+    // Both bar modes share one shell. data-txm-mirror starts at 0 (fail closed: Torn's header stays until
+    // it is mirrored), and the bar MUST precede the header because the hide rules use a sibling combinator.
+    // The gear listens to mousedown and click (some PDA webviews drop the click); openSettings() ignores
+    // the second event for the same mounted modal.
+    function makeBar(mode, html, head, mount) {
         const bar = document.createElement('div');
         bar.className = 'txm-fa-bar';
-        bar.setAttribute('data-txm-mode', 'full');
-        bar.setAttribute('data-txm-mirror', '0');            // fail closed: Torn's header stays until we mirror
+        bar.setAttribute('data-txm-mode', mode);
+        bar.setAttribute('data-txm-mirror', '0');
+        bar.innerHTML = html;                               // set before insertion: one childList record
+        mount.insertBefore(bar, head || mount.firstChild);
+        const gear = q(bar, '.txm-fa-gear');
+        const onGear = (e) => { e.preventDefault(); e.stopPropagation(); safe('settings', () => openSettings(gear)); };
+        gear.addEventListener('mousedown', onGear);
+        gear.addEventListener('click', onGear);
+        return bar;
+    }
 
+    function buildBar(head, mount) {
         const opts = (names, current) => Object.entries(names)
             .map(([v, label]) => `<option value="${v}"${Number(v) === current ? ' selected' : ''}>${label}</option>`)
             .join('');
 
-        // Set before insertion so the whole bar is a single childList record.
-        bar.innerHTML = `
+        const bar = makeBar('full', `
             <div class="txm-fa-row">
                 <span class="txm-fa-brand">RR ATTACK ADVISOR <small>v${VERSION}</small></span>
 
@@ -1151,12 +788,9 @@
                 <div class="txm-fa-advice" hidden></div>
                 <div class="txm-fa-limits" hidden></div>
                 <div class="txm-fa-warn" hidden></div>
+                <div class="txm-fa-hold" hidden></div>
             </div>
-        `;
-
-        // The hide rules use a sibling combinator, so the bar MUST precede the header.
-        if (head) mount.insertBefore(bar, head);
-        else mount.insertBefore(bar, mount.firstChild);
+        `, head, mount);
 
         q(bar, '#torn-slot-select').addEventListener('change', e => {
             slot = Number(e.target.value) || SLOT.MELEE;
@@ -1177,17 +811,6 @@
             if (btn && !btn.disabled) btn.click();
         });
 
-        // mousedown + click both bound - some PDA webviews drop the click.
-        // openSettings() ignores the second event for the same mounted modal.
-        const gear = q(bar, '.txm-fa-gear');
-        const onGear = (e) => {
-            e.preventDefault();
-            e.stopPropagation();
-            safe('settings', () => openSettings(gear));
-        };
-        gear.addEventListener('mousedown', onGear);
-        gear.addEventListener('click', onGear);
-
         barSig = '';                                         // fresh DOM - force a full repaint
         limitsSig = '';                                      // ditto - the limits/warn rows were rebuilt empty
         adviceSig = '';
@@ -1197,33 +820,18 @@
     function authStatusText() {
         if (!validKey(apiKey())) return 'API key required';
         if (Session.state === 'denied') return 'Access restricted';
-        return Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…';
+        return (Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…') +
+            (Hold.reason ? ' · Start Fight paused on war targets' : '');
     }
 
     function buildAuthBar(head, mount) {
-        const bar = document.createElement('div');
-        bar.className = 'txm-fa-bar';
-        bar.setAttribute('data-txm-mode', 'auth');
-        bar.setAttribute('data-txm-mirror', '0');
-        bar.innerHTML = `
+        const bar = makeBar('auth', `
             <div class="txm-fa-row">
                 <span class="txm-fa-brand">RR ATTACK ADVISOR <small>v${VERSION}</small></span>
                 <span class="txm-fa-auth-state"></span>
                 <button type="button" class="txm-fa-gear" title="Settings">&#9881;</button>
             </div>
-        `;
-
-        if (head) mount.insertBefore(bar, head);
-        else mount.insertBefore(bar, mount.firstChild);
-
-        const gear = q(bar, '.txm-fa-gear');
-        const onGear = (event) => {
-            event.preventDefault();
-            event.stopPropagation();
-            safe('settings', () => openSettings(gear));
-        };
-        gear.addEventListener('mousedown', onGear);
-        gear.addEventListener('click', onGear);
+        `, head, mount);
         setText(q(bar, '.txm-fa-auth-state'), authStatusText());
         return bar;
     }
@@ -1237,15 +845,11 @@
         let bar = q(document, '.txm-fa-bar');
 
         const mode = Session.pass() ? 'full' : 'auth';
-        if (bar && bar.getAttribute('data-txm-mode') !== mode) {
-            bar.remove();
-            bar = null;
-        }
+        if (bar && bar.getAttribute('data-txm-mode') !== mode) { bar.remove(); bar = null; }
 
         if (!bar) {
             bar = Session.pass() ? buildBar(head, mount) : buildAuthBar(head, mount);
-        } else if (head && head.parentNode &&
-                   !(bar.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING)) {
+        } else if (head && head.parentNode && !(bar.compareDocumentPosition(head) & Node.DOCUMENT_POSITION_FOLLOWING)) {
             head.parentNode.insertBefore(bar, head);         // React remounted its header in front of us
         }
 
@@ -1304,13 +908,7 @@
         const back = q(bar, '.txm-fa-back');
         setShown(back, !!(h && h.backHref));
         if (h && h.backHref) {
-            if (tgt) {
-                setAttr(back, 'href', FACTION_URL(tgt.oppId));
-                setText(back, 'Back to faction');
-            } else {
-                setAttr(back, 'href', h.backHref);
-                setText(back, h.backText);
-            }
+            if (tgt) { setAttr(back, 'href', FACTION_URL(tgt.oppId)); setText(back, 'Back to faction'); } else { setAttr(back, 'href', h.backHref); setText(back, h.backText); }
         }
     }
 
@@ -1318,52 +916,60 @@
 
     // #region Networking & Data Services
 
-    // War limits. localStorage holds the durable caches so a fresh attack page
-    // (every attack is one) renders instantly instead of blank.
+    // War data comes from Torn with the member's own key, so war targets are known even while the RR
+    // server is unreachable. localStorage shares it between tabs and attack pages (every attack is one).
     const War = {
         state: 'idle',                                      // idle | nowar | war | error
-        oppId: null,
-        oppName: null,
+        factionId: null,                                    // our faction, from the session or the saved record
+        ranked: null,
         roster: null,                                       // Set of enemy user ids
+        rosterId: null,
         startAt: 0,                                         // ms; ranked war start time
         inFlight: false,
         retryAt: 0,
-        gen: 0,                                             // bumped on key change; stale responses are discarded
-        ranked: null,
-        rosterId: null
+        gen: 0                                              // bumped on key change; stale responses are discarded
     };
 
     const Limits = {
         payload: null,
         at: 0,                                              // when the figure was fetched
         nextAt: 0,                                          // when to poll again
+        validUntil: 0,                                      // the figure may decide a hit until then
         inFlight: false,
-        authFailed: false,                                  // a rejected key must never re-hit auth each sync
-        rejects: 0,                                         // consecutive resource 401s; 3 strikes ends the re-mint loop
+        authFailed: false,                                  // ZZCraft refused the key: retried only after REJECTED_RETRY
+        rejects: 0,                                         // consecutive resource 401s; 3 strikes marks authFailed
         gen: 0
     };
 
-    function retryDelay(response) {
+    function retryDelay(response, fallback = RETRY_NET) {
         const headers = response && response.headers;
         const value = headerValue(headers, 'retry-after');
-        if (!value) return RETRY_NET;
+        if (!value) return fallback;
         const seconds = Number(value);
         // A date is measured against the same reply's clock, never this PC's.
         const stamp = replyTime(headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
         const delay = Number.isFinite(seconds) ? seconds * 1000 : from == null ? NaN : Date.parse(value) - from;
-        return Number.isFinite(delay) ? Math.max(1000, delay) : RETRY_NET;
+        return Number.isFinite(delay) ? Math.max(1000, delay) : fallback;
+    }
+
+    // Only a key change or a denial forgets the member's war data; a lapsed session keeps it.
+    function forgetMember() {
+        storeDel(STORAGE_WAR);
+        secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
+        Object.assign(War, { state: 'idle', factionId: null, ranked: null, roster: null, rosterId: null, startAt: 0, inFlight: false, retryAt: 0, gen: War.gen + 1 });
+        Object.assign(Limits, { payload: null, at: 0, nextAt: 0, validUntil: 0, inFlight: false, authFailed: false, rejects: 0, gen: Limits.gen + 1 });
+        WarRoom.reset();
     }
 
     // Records stored before the PC clock was set back carry times from the old setting.
     function afterClockSetBack() {
         secureDelete(SESSION_STORAGE_KEY).catch(() => {});
+        secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
         storeDel(STORAGE_WAR);
     }
 
     // After the clock jumps forward the session may look spent: renew now rather than at the next timer.
-    function afterClockSetForward() {
-        if (apiKeyLoaded) void Session.refresh();
-    }
+    function afterClockSetForward() { if (apiKeyLoaded) void Session.refresh(); }
 
     async function keyFingerprint(key) {
         const bytes = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(key));
@@ -1397,7 +1003,7 @@
             // While the current session still works, try a failed renewal once more before it
             // runs out; waiting the full cooldown would drop authorization first.
             const renewBy = this.pass() ? this.expiresAt - AUTH_EXPIRY_SKEW_MS - nowMs() : 0;
-            const wait = retryDelay(response);
+            const wait = retryDelay(response, response ? RETRY_NET : RETRY_QUICK);
             const delay = renewBy > 0 ? Math.min(wait, Math.max(5000, renewBy)) : wait;
             this.nextTryAt = nowMs() + delay;
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
@@ -1449,74 +1055,69 @@
                         !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) throw new Error('Invalid authorization response');
                     const record = { token: data.token, expiresAt, renewAt: Math.min(nowMs() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
                         playerId: data.playerId, factionId: data.factionId, keyHash, version: VERSION };
-                    await secureSet(SESSION_STORAGE_KEY, JSON.stringify({ ...record, expiresAt: toStored(record.expiresAt), renewAt: toStored(record.renewAt) }));
-                    if (gen !== this.gen || key !== apiKey()) return;
                     this.accept(record);
+                    // Shared with other tabs and later pages; a store that refuses the write only costs them a login.
+                    await secureSet(SESSION_STORAGE_KEY, JSON.stringify({ ...record, expiresAt: toStored(record.expiresAt), renewAt: toStored(record.renewAt) })).catch(() => {});
                 } else if (response.status === 401 || response.status === 403) {
                     await secureDelete(SESSION_STORAGE_KEY);
                     if (gen !== this.gen || key !== apiKey()) return;
                     this.token = null; this.expiresAt = 0; this.state = 'denied';
-                    this.nextTryAt = nowMs() + retryDelay(response); onSessionChange();
+                    this.nextTryAt = nowMs() + retryDelay(response); forgetMember(); onSessionChange();
                 } else this.deferRetry(response);
             };
             try {
-                // Web Locks serialize renewals between tabs. PDA without this browser API
-                // still reuses protected storage and coalesces within this script instance.
-                if (typeof navigator !== 'undefined' && navigator.locks) await navigator.locks.request('rr-attack-session', run);
-                else await run();
+                // Web Locks serialize renewals between tabs; a lock not granted in time is not waited for.
+                // PDA without this browser API still reuses protected storage within this script instance.
+                if (typeof navigator !== 'undefined' && navigator.locks) {
+                    const wait = new AbortController(), timer = setTimeout(() => wait.abort(), LOCK_TIMEOUT);
+                    try { await navigator.locks.request('rr-attack-session', { signal: wait.signal }, () => { clearTimeout(timer); return run(); }); }
+                    catch (e) { if (!e || e.name !== 'AbortError') throw e; await run(); }
+                    finally { clearTimeout(timer); }
+                } else await run();
             } catch (_) { if (gen === this.gen && key === apiKey()) this.deferRetry(); }
             finally { if (gen === this.gen) this.inFlight = false; }
         }
     };
 
+    const zzToken = t => typeof t === 'string' && t.length > 0 && t.length <= 8192 && !/[\u0000-\u001f\u007f]/.test(t);
+
+    // The ZZCraft login is kept between attack pages, bound to the key it was made with, so a
+    // paused war hit waits for one limits request rather than a login as well.
     const WarRoom = {
         token: null,
         inFlight: false,
         nextTryAt: 0,
+        refused: false,                                     // ZZCraft refused the key at login: retried after REJECTED_RETRY
         gen: 0,
-        reset() {
-            this.gen++;
-            this.token = null;
-            this.inFlight = false;
-            this.nextTryAt = 0;
-        },
+        reset() { this.gen++; this.token = null; this.inFlight = false; this.nextTryAt = 0; this.refused = false; secureDelete(ZZ_STORAGE_KEY).catch(() => {}); },
         async ensure() {
             if (!Session.pass() || !validKey(apiKey())) return null;
             if (this.token) return this.token;
             if (this.inFlight || nowMs() < this.nextTryAt) return null;
 
-            const gen = this.gen;
+            const gen = this.gen, key = apiKey();
             this.inFlight = true;
             try {
-                const response = await crossOriginFetch(
-                    ZZCRAFT_API,
-                    'POST',
-                    '/auth/login',
-                    { 'Content-Type': 'application/json', 'User-Agent': ZZCRAFT_USERAGENT },
-                    JSON.stringify({ apikey: apiKey() })
-                );
+                const keyHash = await keyFingerprint(key);
+                let saved = null;
+                try { saved = JSON.parse(await secureGet(ZZ_STORAGE_KEY) || 'null'); } catch (_) { /* not a login */ }
+                if (gen !== this.gen || !Session.pass()) return null;
+                if (saved && saved.keyHash === keyHash && zzToken(saved.token)) return (this.token = saved.token);
+                const response = await crossOriginFetch(ZZCRAFT_API, 'POST', '/auth/login',
+                    { 'Content-Type': 'application/json', 'User-Agent': ZZCRAFT_USERAGENT }, JSON.stringify({ apikey: key }));
                 if (gen !== this.gen || !Session.pass()) return null;
                 if (!response.ok) {
-                    this.nextTryAt = nowMs() + retryDelay(response);
+                    this.refused = response.status === 401 || response.status === 403;
+                    this.nextTryAt = nowMs() + (this.refused ? REJECTED_RETRY : retryDelay(response));
                     return null;
                 }
-
                 const data = JSON.parse(response.text);
-                if (typeof data.token !== 'string' ||
-                    data.token.length < 1 ||
-                    data.token.length > 8192 ||
-                    /[\u0000-\u001f\u007f]/.test(data.token)) {
-                    throw new Error('invalid WarRoom token');
-                }
+                if (!zzToken(data.token)) throw new Error('invalid WarRoom token');
                 this.token = data.token;
-                this.nextTryAt = 0;
+                this.nextTryAt = 0; this.refused = false;
+                secureSet(ZZ_STORAGE_KEY, JSON.stringify({ keyHash, token: data.token })).catch(() => {});
                 return this.token;
-            } catch (e) {
-                if (gen === this.gen) this.nextTryAt = nowMs() + RETRY_NET;
-                return null;
-            } finally {
-                if (gen === this.gen) this.inFlight = false;
-            }
+            } catch (e) { if (gen === this.gen) this.nextTryAt = nowMs() + RETRY_QUICK; return null; } finally { if (gen === this.gen) this.inFlight = false; }
         }
     };
 
@@ -1533,15 +1134,23 @@
             temp: temp ? { empty: temp.empty, name: temp.name || null } : null,
             // Required by the deployed API; outcome presentation is now entirely local.
             labels: [], attackType: 1, defenderId: defenderId() ? Number(defenderId()) : null,
-            war: { state: War.state, ranked: War.ranked, factionId: Session.factionId,
-                roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster) } : null },
-            limits: Limits.payload ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member } : null
+            war: { state: War.state, ranked: War.ranked, factionId: Session.factionId || War.factionId,
+                roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster).sort((a, b) => a - b) } : null },
+            limits: Limits.payload && nowMs() < Limits.validUntil ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member } : null
         };
     }
 
+    let unauthorizedAt = -Infinity;                         // last 401 from a protected request
+
     const Analysis = {
-        result: null, signature: '', observed: '', pending: false, gen: 0, nextTryAt: 0, expiresAt: 0, block: null,
-        reset() { this.gen++; this.result = null; this.signature = ''; this.observed = ''; this.pending = false; this.nextTryAt = 0; this.expiresAt = 0; this.block = null; },
+        result: null, signature: '', observed: '', pending: false, gen: 0, nextTryAt: 0, expiresAt: 0, renewAt: 0,
+        block: null,                                        // a known prohibition: hit cap, no hits, or war not started
+        clear: null,                                        // a complete verdict that allows Start Fight
+        rejected: '', rejectedUntil: 0,                     // the request the server refused as invalid, and until when
+        reset() {
+            this.gen++; this.result = null; this.signature = ''; this.observed = ''; this.pending = false; this.nextTryAt = 0;
+            this.expiresAt = 0; this.renewAt = 0; this.block = null; this.clear = null; this.rejected = ''; this.rejectedUntil = 0;
+        },
         current() { return Session.pass() && !!this.result && this.signature === this.observed && nowMs() < this.expiresAt; },
         // Retain presentation during a request only when its relevant observations
         // still match. Permission and data acquisition continue to use current().
@@ -1566,11 +1175,21 @@
             }
             return true;
         },
+        // True while a complete "allowed" verdict still matches this defender, war and limits. It keeps
+        // covering Start Fight for HOLD_GRACE past its expiry while its own renewal is in flight.
+        cleared(input = analysisInput()) {
+            const c = this.clear;
+            if (!c || !Session.pass() || c.sessionGen !== Session.gen || c.search !== location.search ||
+                c.context !== JSON.stringify([input.defenderId, input.war, input.limits])) return false;
+            return nowMs() < c.until || (this.pending && nowMs() < c.until + HOLD_GRACE);
+        },
         async refresh() {
             if (!Session.pass()) return;
             const input = analysisInput(), signature = JSON.stringify(input);
             this.observed = signature;
-            if (this.current() || this.pending || nowMs() < this.nextTryAt) return;
+            // A decision is renewed shortly before it runs out, so an allowed Start Fight never lapses in between.
+            if ((this.current() && nowMs() < this.renewAt) || this.pending || nowMs() < this.nextTryAt ||
+                (signature === this.rejected && nowMs() < this.rejectedUntil)) return;
             const gen = this.gen, sessionGen = Session.gen, token = Session.token, search = location.search;
             this.pending = true;
             schedule();
@@ -1579,41 +1198,59 @@
                     { Authorization: 'Bearer ' + token, 'Content-Type': 'application/json' }, signature);
                 if (gen !== this.gen || sessionGen !== Session.gen || token !== Session.token || search !== location.search || !Session.pass()) return;
                 if (response.status === 401 || response.status === 403) {
+                    // A 401 means the session ended early (e.g. a server update): log in again at once, but
+                    // only once a minute and only once the refused session is deleted. A 403 means not a member.
+                    const again = response.status === 401 && nowMs() - unauthorizedAt > RETRY_NET;
+                    if (response.status === 401) unauthorizedAt = nowMs();
                     Session.reset(); Session.state = response.status === 403 ? 'denied' : 'unknown';
                     Session.nextTryAt = nowMs() + retryDelay(response);
-                    await secureDelete(SESSION_STORAGE_KEY); onSessionChange();
+                    const cleared = Session.gen;
+                    await secureDelete(SESSION_STORAGE_KEY).catch(() => {});
+                    if (again && cleared === Session.gen) Session.nextTryAt = 0;
+                    if (response.status === 403) forgetMember();
+                    onSessionChange();
+                    return;
+                }
+                if (response.status === 400 || response.status === 413) {
+                    // A request the server refused is not resent unchanged for a while; a changed one goes at once.
+                    this.result = null; this.rejected = signature; this.rejectedUntil = nowMs() + REJECTED_RETRY;
                     return;
                 }
                 if (!response.ok) { this.result = null; this.nextTryAt = nowMs() + retryDelay(response); return; }
-                if (signature !== JSON.stringify(analysisInput())) return;
                 const result = JSON.parse(response.text);
                 if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt)) throw new Error('Invalid analysis response');
-                this.result = result; this.signature = signature;
                 // revalidateAt is server time: keep this decision until the server clock may reach it,
                 // or for 10 s while server time is not yet known.
                 const revalidate = ServerTime.deadline(result.revalidateAt);
-                this.expiresAt = Math.min(Math.max(nowMs() + 1000, revalidate ?? nowMs() + 10000), Session.expiresAt);
-                this.nextTryAt = 0;
-                // A known prohibition survives equipment/advice renewal for this same war target.
-                // A new decision replaces it; navigation, authorization and war changes invalidate it.
-                this.block = result.limits.blocked ? { sessionGen, search,
-                    context: JSON.stringify([input.defenderId, input.war]),
-                    until: result.limits.pending ? result.war.startAt : Infinity } : null;
-                War.oppId = result.war.oppId; War.oppName = result.war.oppName; War.startAt = result.war.startAt;
-            } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = nowMs() + RETRY_NET; } }
+                const until = Math.min(Math.max(nowMs() + 1000, revalidate ?? nowMs() + 10000), Session.expiresAt);
+                this.verdict(input, result, until, sessionGen, search);
+                War.startAt = result.war.startAt;
+                // Advice for gear that changed meanwhile is out of date and asked for again; the verdict stands.
+                if (signature !== JSON.stringify(analysisInput())) return;
+                this.result = result; this.signature = signature; this.expiresAt = until; this.nextTryAt = 0;
+                this.renewAt = until - Math.min(RENEW_LEAD, (until - nowMs()) / 2);
+            } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = nowMs() + RETRY_QUICK; } }
             finally { if (gen === this.gen) { this.pending = false; schedule(); } }
+        },
+        // Only a complete verdict may set or lift the block, or allow Start Fight: a pre-war verdict,
+        // "not a target" decided with the roster (or with no war), or a war-phase verdict made with limits.
+        // A known prohibition therefore survives equipment and advice renewal for the same war target.
+        verdict(input, result, until, sessionGen, search) {
+            const now = analysisInput(), context = i => JSON.stringify([i.defenderId, i.war, i.limits]);
+            if (context(now) !== context(input)) return;
+            const pending = !!result.limits.pending;
+            if (!(result.war.target ? pending || input.limits !== null : input.war.state === 'nowar' || input.war.roster !== null)) return;
+            this.block = result.limits.blocked ? { sessionGen, search, context: JSON.stringify([input.defenderId, input.war]),
+                until: pending ? result.war.startAt : Infinity } : null;
+            this.clear = result.limits.blocked ? null : { sessionGen, search, until, context: context(input) };
         }
     };
 
-    function apiKey() {
-        return authApiKey;
-    }
+    function apiKey() { return authApiKey; }
 
     // The API only accepts 16- or 50-char alphanumeric keys - catch typos
     // before transmitting the key anywhere.
-    function validKey(k) {
-        return /^[A-Za-z0-9]{16}$/.test(k) || /^[A-Za-z0-9]{50}$/.test(k);
-    }
+    function validKey(k) { return /^[A-Za-z0-9]{16}$/.test(k) || /^[A-Za-z0-9]{50}$/.test(k); }
 
     // Keyed to the current URL, not the page lifetime - TornPDA re-navigates
     // in place (the injection guard exists for exactly that), and a stale id
@@ -1633,6 +1270,70 @@
         return war && war.target ? { oppId: war.oppId, pending: war.phase === 'pending' } : null;
     }
 
+    // Whether this defender is an enemy in the current war, by the same rule the server uses.
+    function warTargetKind(input) {
+        const war = input.war;
+        if (!input.defenderId || war.state === 'nowar') return 'none';
+        if (war.state !== 'war' || !war.ranked || !war.factionId) return 'unknown';
+        const opp = war.ranked.factions.find(f => f.id !== war.factionId);
+        if (!opp || !war.roster || war.roster.oppId !== opp.id) return 'unknown';
+        return war.roster.ids.includes(input.defenderId) ? 'target' : 'none';
+    }
+
+    // Faction rule: Start Fight on a war target stays paused until a complete verdict allows it, however
+    // long that takes. holdReason() says why it is paused, or ''. Members with no key, denied members and
+    // installs with no sign of faction membership (no session and no saved war data) keep Torn's controls.
+    const Hold = { reason: '', unlocked: false };
+    const HOLD_TEXT = {
+        checking: 'Checking war limits… Start Fight paused',
+        war: 'Checking war status… Start Fight paused',
+        limits: 'Waiting for ZZCraft war limits… Start Fight paused',
+        zzcraft: 'ZZCraft rejected your key: Start Fight paused. Save your Torn API key in Settings to retry.',
+        rejected: 'The RR server refused this check: Start Fight paused. Update the script.'
+    };
+
+    function holdReason() {
+        if (apiKeyLoaded ? !validKey(apiKey()) || Session.state === 'denied' : !War.factionId) return '';
+        if (Analysis.blocked()) return Analysis.block.until === Infinity ? 'limit' : 'pending';
+        const input = analysisInput(), kind = warTargetKind(input);
+        if (kind === 'none' || (!Session.pass() && !War.factionId)) return '';
+        if (kind === 'target' && Analysis.cleared(input)) return '';
+        if (!Session.pass()) return Session.nextTryAt > nowMs() ? 'unavailable' : 'verifying';
+        if (kind === 'unknown') return 'war';
+        if (Analysis.rejected && Analysis.rejected === Analysis.observed) return 'rejected';
+        if (input.limits || !ServerTime.reached(input.war.ranked.start * 1000)) return 'checking';
+        return Limits.authFailed || WarRoom.refused ? 'zzcraft' : 'limits';
+    }
+
+    // Applied to every button row, independently of the bar, before anything that could fail or return early.
+    function guardStartFight() {
+        // Should the check itself fail, a defender on the saved enemy roster stays held.
+        let reason = safe('hold', holdReason);
+        if (typeof reason !== 'string') reason = War.roster && War.roster.has(Number(defenderId())) ? 'checking' : '';
+        let unlocked = false;
+        qa(document, sel('dialogButtons')).forEach(box => {
+            setAttr(box, 'translate', 'no');                // browser translation must not rename the buttons matched here
+            const buttons = qa(box, 'button');
+            const labels = buttons.map(b => b.textContent.replace(/\s+/g, ' ').trim().toLowerCase());
+            const other = t => OUTCOME_LABELS.includes(t) || t === 'continue';
+            buttons.forEach((b, i) => {
+                // While paused, a lone button that is not an outcome or Continue is Start Fight in any wording.
+                const start = START_LABELS.includes(labels[i]) || (reason && buttons.length === 1 && !other(labels[i]));
+                if (reason && start) setAttr(b, 'data-txm-block', reason); else delAttr(b, 'data-txm-block');
+            });
+            if (reason && buttons.length > 1 && !labels.some(t => START_LABELS.includes(t) || other(t))) unlocked = true;
+        });
+        Hold.reason = reason; Hold.unlocked = unlocked;
+    }
+
+    // Limits are needed once a decision shows them, or as soon as the defender is a known target in a
+    // war that has started, so the first check can already include them.
+    function limitsWanted() {
+        if (Analysis.current() && Analysis.result.limits.visible) return true;
+        const input = analysisInput();
+        return warTargetKind(input) === 'target' && ServerTime.reached(input.war.ranked.start * 1000);
+    }
+
     // "Saturday, 8th August at 20:00" in the viewer's local time zone.
     function warStartText() {
         const d = new Date(War.startAt);
@@ -1647,27 +1348,15 @@
 
     const FACTION_URL = (id) => `https://www.torn.com/factions.php?step=profile&ID=${id}`;
 
-    // Torn answers 200 with an {error:{code,error}} envelope, so an ok status
-    // is not enough on its own.
+    // Torn answers 200 with an {error:{code,error}} envelope, so an ok status is not enough on its own.
+    // Sent through the userscript transport like every other request: Torn's API only accepts the
+    // torn.com origin, which a page fetch from some browser extensions does not send.
     async function tornGet(path) {
         const key = apiKey();
         if (!validKey(key)) return { error: 'nokey' };
-
-        const ctl = new AbortController();
-        const timer = setTimeout(() => ctl.abort(), 20000);  // a hung fetch must never pin inFlight forever
-        let res, body;
-        try {
-            // The timer spans the BODY read too - fetch resolves at headers,
-            // and a stalled body would otherwise hang with no abort left.
-            res = await fetch(`${TORN_API}${path}`, {
-                headers: { Authorization: `ApiKey ${key}` },
-                credentials: 'omit',
-                signal: ctl.signal
-            });
-            body = await res.json().catch(() => null);
-        } finally {
-            clearTimeout(timer);
-        }
+        const res = await crossOriginFetch(TORN_API, 'GET', path, { Authorization: `ApiKey ${key}` });
+        let body = null;
+        try { body = JSON.parse(res.text); } catch (e) { /* not JSON */ }
         if (body && body.error) return { error: body.error.error || 'api', code: body.error.code };
         if (!res.ok) return { error: 'http ' + res.status };
         if (body == null) return { error: 'bad response' };
@@ -1683,6 +1372,7 @@
         const ranked = rec && rec.war && rec.war.ranked;
         if (!object(rec) || !id(rec.factionId) || !object(rec.war) || !timestamp(rec.war.at) ||
             !(ranked === null || (object(ranked) && Number.isFinite(ranked.start) && ranked.start >= 0 &&
+                (ranked.end == null || Number.isFinite(ranked.end)) &&
                 Array.isArray(ranked.factions) && ranked.factions.length === 2 &&
                 ranked.factions.every(f => object(f) && id(f.id) && typeof f.name === 'string' && f.name.length <= 200))) ||
             !(rec.roster == null || (object(rec.roster) && id(rec.roster.oppId) && timestamp(rec.roster.at) &&
@@ -1693,57 +1383,64 @@
         return rec;
     }
 
+    // Our faction comes from the session, or from the saved record while there is none. Saved data stays
+    // usable for WAR_KEEP (refreshed after TTL_WAR / TTL_ROSTER), so a failed refresh never drops the war.
     function applyWarCache(rec) {
-        if (!Session.pass() || !rec || rec.factionId !== Session.factionId || !fresh(rec.war, TTL_WAR)) return;
+        const factionId = Session.factionId || (rec && rec.factionId);
+        if (!rec || !factionId || rec.factionId !== factionId || !fresh(rec.war, WAR_KEEP)) return false;
         const before = JSON.stringify([War.state, War.ranked, War.rosterId, War.roster && Array.from(War.roster)]);
-        War.ranked = rec.war.ranked;
-        War.state = rec.war.ranked ? 'war' : 'nowar';
+        // A war whose end has certainly passed on the server clock is over.
+        const ranked = rec.war.ranked && !(rec.war.ranked.end > 0 && ServerTime.reached(rec.war.ranked.end * 1000)) ? rec.war.ranked : null;
+        War.factionId = factionId;
+        War.ranked = ranked;
+        War.state = ranked ? 'war' : 'nowar';
         War.roster = null; War.rosterId = null;
-        if (rec.war.ranked && rec.roster && fresh(rec.roster, TTL_ROSTER)) {
-            War.roster = new Set(rec.roster.ids); War.rosterId = rec.roster.oppId;
-        }
+        if (ranked && rec.roster && fresh(rec.roster, WAR_KEEP)) { War.roster = new Set(rec.roster.ids); War.rosterId = rec.roster.oppId; }
         const changed = before !== JSON.stringify([War.state, War.ranked, War.rosterId, War.roster && Array.from(War.roster)]);
         if (changed) schedule();
         return changed;
     }
 
-    function hydrateWar() {
-        applyWarCache(readWarCache());
-    }
+    function hydrateWar() { applyWarCache(readWarCache()); }
 
     async function loadWar() {
-        if (!Session.pass() || War.inFlight || nowMs() < War.retryAt) return;
-        const gen = War.gen, sessionGen = Session.gen;
+        const factionId = Session.factionId || War.factionId, key = apiKey();
+        if (!validKey(key) || Session.state === 'denied' || !factionId || War.inFlight || nowMs() < War.retryAt) return;
+        const gen = War.gen;
         const rec = readWarCache() || {};
-        if (rec.factionId !== Session.factionId) { rec.war = null; rec.roster = null; }
-        rec.factionId = Session.factionId;
+        if (rec.factionId !== factionId) { rec.war = null; rec.roster = null; }
+        rec.factionId = factionId;
         War.inFlight = true;
         try {
             if (!fresh(rec.war, TTL_WAR)) {
                 const r = await tornGet('/faction/wars');
-                if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
+                if (gen !== War.gen || key !== apiKey()) return;
                 if (r.error) throw new Error('wars: ' + r.error);
-                const ranked = r.data.wars && r.data.wars.ranked;
-                rec.war = { ranked: ranked ? { start: ranked.start, factions: ranked.factions.map(f => ({ id: f.id, name: f.name })) } : null, at: toStored(nowMs()) };
-                rec.roster = null;
+                const w = r.data.wars && r.data.wars.ranked;
+                const ranked = w ? { start: w.start, end: w.end || null, factions: w.factions.map(f => ({ id: f.id, name: f.name })) } : null;
+                // The same war keeps its roster, so the block's context does not change under it.
+                const same = ranked && rec.war && rec.war.ranked && rec.war.ranked.start === ranked.start &&
+                    JSON.stringify(rec.war.ranked.factions) === JSON.stringify(ranked.factions);
+                rec.war = { ranked, at: toStored(nowMs()) };
+                if (!same) rec.roster = null;
                 jsonSet(STORAGE_WAR, rec);
             }
-            // A changed observation must reach analysis before its opponent can select a roster.
-            if (applyWarCache(rec) || !rec.war.ranked) return;
-            // The server chooses the opposing faction. The client only transports
-            // the resulting Torn request using this user's key.
-            const oppId = Analysis.current() && Analysis.result.war.oppId;
-            if (oppId && (!fresh(rec.roster, TTL_ROSTER) || rec.roster.oppId !== oppId)) {
-                const r = await tornGet('/faction/' + oppId + '/members');
-                if (gen !== War.gen || sessionGen !== Session.gen || !Session.pass()) return;
+            // A changed observation must reach analysis before its opponent's roster is fetched.
+            if (applyWarCache(rec) || !War.ranked) return;
+            // The opponent is the other faction in our ranked war, as the server decides it.
+            const opp = War.ranked.factions.find(f => f.id !== factionId);
+            if (opp && (!fresh(rec.roster, TTL_ROSTER) || rec.roster.oppId !== opp.id)) {
+                const r = await tornGet('/faction/' + opp.id + '/members');
+                if (gen !== War.gen || key !== apiKey()) return;
                 if (r.error) throw new Error('members: ' + r.error);
-                rec.roster = { oppId, ids: (r.data.members || []).map(m => m.id), at: toStored(nowMs()) };
+                rec.roster = { oppId: opp.id, ids: (r.data.members || []).map(m => m.id), at: toStored(nowMs()) };
                 jsonSet(STORAGE_WAR, rec); applyWarCache(rec);
             }
         } catch (_) {
-            if (gen !== War.gen || sessionGen !== Session.gen) return;
-            War.state = 'error'; War.ranked = null; War.roster = null; War.rosterId = null;
-            War.retryAt = nowMs() + RETRY_NET; storeDel(STORAGE_WAR); schedule();
+            if (gen !== War.gen) return;
+            // The last good war data stays; only with none at all is the war state unknown.
+            if (War.state !== 'war' && War.state !== 'nowar') War.state = 'error';
+            War.retryAt = nowMs() + RETRY_NET; schedule();
         } finally { if (gen === War.gen) War.inFlight = false; }
     }
 
@@ -1791,6 +1488,7 @@
                 headers: headers || {},
                 data: body || null,
                 timeout: timeoutMs,
+                anonymous: true,                            // none of these services uses cookies
                 onload: r => resolve(reply(r)),
                 onerror: () => reject(new Error('network')),
                 ontimeout: () => reject(new Error('timeout'))
@@ -1798,156 +1496,120 @@
         });
     }
 
+    // Restores this player's last limits until they fall due, so a fresh attack page (every attack is
+    // one) can be checked at once instead of waiting for ZZCraft.
     function hydrateLimits() {
-        storeDel(STORAGE_JWT);
-        storeDel(STORAGE_LIMITS);
-        storeDel('txm-debug-seeded');                       // legacy debug fixture marker
-        Limits.payload = null;
-        Limits.at = 0;
+        if (!Session.pass()) return;
+        const player = playerId;
+        secureGet(LIMITS_STORAGE_KEY).then(text => {
+            const rec = JSON.parse(text || 'null'), payload = rec && rec.payload;
+            // Only a whole record for this player counts; anything else is ignored, never read as "no limits".
+            if (!payload || typeof payload !== 'object' || !('currentLimit' in payload) || !('member' in payload) ||
+                rec.playerId !== player || player !== playerId || Limits.payload || !(fromStored(rec.validUntil) > nowMs())) return;
+            const currentLimit = sanitizeCurrentLimit(payload.currentLimit), member = sanitizeMember(payload.member);
+            if (currentLimit === undefined || member === undefined) return;
+            Object.assign(Limits, { payload: { currentLimit, member, nextUpdate: null }, at: fromStored(rec.at),
+                nextAt: fromStored(rec.nextAt), validUntil: fromStored(rec.validUntil) });
+            schedule();
+        }).catch(() => {});
     }
 
-    async function ensurePlayerId() {
-        return Session.pass() ? playerId : null;
-    }
-
-    function nonNegativeNumberOrNull(value) {
+    // ZZCraft's figures: each null or a non-negative number, or the record is refused (undefined).
+    function figures(value, fields) {
         if (value == null) return null;
-        return typeof value === 'number' && Number.isFinite(value) && value >= 0 ? value : undefined;
+        if (typeof value !== 'object' || Array.isArray(value)) return undefined;
+        const out = {};
+        for (const field of fields) {
+            const v = value[field];
+            if (v != null && !(typeof v === 'number' && Number.isFinite(v) && v >= 0)) return undefined;
+            out[field] = v == null ? null : v;
+        }
+        return out;
     }
 
     function sanitizeCurrentLimit(value) {
-        if (value == null) return null;
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-
-        const minHits = nonNegativeNumberOrNull(value.minHits);
-        const maxHits = nonNegativeNumberOrNull(value.maxHits);
-        const minTotalRespect = nonNegativeNumberOrNull(value.minTotalRespect);
-        const maxTotalRespect = nonNegativeNumberOrNull(value.maxTotalRespect);
-        const averageRespectGoal = nonNegativeNumberOrNull(value.averageRespectGoal);
+        const limit = figures(value, ['minHits', 'maxHits', 'minTotalRespect', 'maxTotalRespect', 'averageRespectGoal']);
+        if (!limit) return limit;
         const noHitsAllowed = value.noHitsAllowed == null ? false : value.noHitsAllowed;
-        if ([minHits, maxHits, minTotalRespect, maxTotalRespect, averageRespectGoal]
-            .some(number => number === undefined) || typeof noHitsAllowed !== 'boolean') {
-            return undefined;
-        }
-        return {
-            minHits, maxHits, minTotalRespect, maxTotalRespect,
-            averageRespectGoal, noHitsAllowed
-        };
+        return typeof noHitsAllowed === 'boolean' ? { ...limit, noHitsAllowed } : undefined;
     }
 
-    function sanitizeMember(value) {
-        if (value == null) return null;
-        if (!value || typeof value !== 'object' || Array.isArray(value)) return undefined;
-        const nbWarHits = nonNegativeNumberOrNull(value.nbWarHits);
-        const averageRespect = nonNegativeNumberOrNull(value.averageRespect);
-        const nbHitsNotAllowed = nonNegativeNumberOrNull(value.nbHitsNotAllowed);
-        if ([nbWarHits, averageRespect, nbHitsNotAllowed].some(number => number === undefined)) {
-            return undefined;
-        }
-        return { nbWarHits, averageRespect, nbHitsNotAllowed };
-    }
+    const sanitizeMember = value => figures(value, ['nbWarHits', 'averageRespect', 'nbHitsNotAllowed']);
 
     function sanitizeLimitsPayload(value, ownPlayerId) {
         if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
         const currentLimit = sanitizeCurrentLimit(value.currentLimit);
-        if (currentLimit === undefined || !Array.isArray(value.members) || value.members.length > 500) {
-            return null;
-        }
+        if (currentLimit === undefined || !Array.isArray(value.members) || value.members.length > 500) { return null; }
         const rawMember = value.members.find(member =>
             member && typeof member === 'object' && Number(member.id) === ownPlayerId
         );
         const member = sanitizeMember(rawMember || null);
         if (member === undefined) return null;
 
-        const nextUpdate = value.nextUpdate;
-        if (nextUpdate != null &&
-            (typeof nextUpdate !== 'string' || !Number.isFinite(Date.parse(nextUpdate)))) {
-            return null;
-        }
-        return { currentLimit, member, nextUpdate: nextUpdate || null };
+        // An unreadable nextUpdate only means "poll again soon"; it never discards the limits.
+        return { currentLimit, member, nextUpdate: Number.isFinite(zzTime(value.nextUpdate)) ? value.nextUpdate : null };
     }
 
-    async function fetchWarRoomLimits(token) {
-        return crossOriginFetch(
-            ZZCRAFT_API,
-            'GET',
-            '/rankedwars/last',
-            { Authorization: `Bearer ${token}`, 'User-Agent': ZZCRAFT_USERAGENT  }
-        );
+    // ZZCraft's times may carry no zone or use a space, which iPhone Safari cannot parse; both mean UTC.
+    function zzTime(value) {
+        if (typeof value !== 'string') return NaN;
+        const plain = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/.exec(value.trim());
+        return Date.parse(plain ? `${plain[1]}T${plain[2]}Z` : value);
+    }
+
+    function fetchWarRoomLimits(token) {
+        return crossOriginFetch(ZZCRAFT_API, 'GET', '/rankedwars/last', { Authorization: `Bearer ${token}`, 'User-Agent': ZZCRAFT_USERAGENT });
     }
 
     async function loadLimits() {
-        if (!Session.pass()) return;
-        if (Limits.inFlight || Limits.authFailed) return;
-        if (nowMs() < Limits.nextAt) return;
+        if (!Session.pass() || Limits.inFlight || nowMs() < Limits.nextAt) return;
 
         const gen = Limits.gen;                             // a key change mid-flight voids this response
-        const sessionGen = Session.gen;
+        const sessionGen = Session.gen, ownPlayerId = playerId;
+        const stale = () => gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass();
+        // On a failure the last figures keep deciding hits only while still valid.
+        const lapse = retry => { if (!(nowMs() < Limits.validUntil)) { Limits.payload = null; Limits.at = 0; } Limits.nextAt = nowMs() + retry; };
         Limits.inFlight = true;
         try {
-            const ownPlayerId = await ensurePlayerId();
-            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
             let token = await WarRoom.ensure();
-            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
+            if (stale()) return;
             if (!ownPlayerId || !token) throw new Error('WarRoom unavailable');
 
             let res = await fetchWarRoomLimits(token);
             if (res.status === 401) {
-                if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
+                if (stale()) return;
                 WarRoom.reset();
                 token = await WarRoom.ensure();
                 if (gen !== Limits.gen || sessionGen !== Session.gen) return;
                 if (token) res = await fetchWarRoomLimits(token);
             }
-            if (gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass()) return;
+            if (stale()) return;
 
             if (res.status === 401 || res.status === 403) {
                 Limits.rejects++;
                 Limits.authFailed = Limits.rejects >= 3;
                 WarRoom.reset();
-                Limits.payload = null;
-                Limits.at = 0;
-                Limits.nextAt = nowMs() + RETRY_NET;
+                lapse(Limits.authFailed ? REJECTED_RETRY : RETRY_NET);
                 return;
             }
-            if (!res.ok) {
-                Limits.payload = null; Limits.at = 0; Limits.nextAt = nowMs() + retryDelay(res);
-                return;
-            }
+            if (!res.ok) { lapse(retryDelay(res, RETRY_QUICK)); return; }
             Limits.rejects = 0;
             Limits.authFailed = false;
 
             const payload = sanitizeLimitsPayload(JSON.parse(res.text), ownPlayerId);
             if (!payload) throw new Error('invalid limits response');
-            Limits.payload = payload;
-            Limits.at = nowMs();
-
             // Honour the service's own nextUpdate, clamped so a bad value cannot spin us. It is
             // ZZCraft's time, so measure the wait with ZZCraft's clock from the same reply.
-            const nx = payload && payload.nextUpdate && Date.parse(payload.nextUpdate);
+            const nx = zzTime(payload.nextUpdate);
             const stamp = replyTime(res.headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
-            const wait = nx && from != null ? nx - from : POLL_MIN;
-            Limits.nextAt = nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait));
+            const wait = Number.isFinite(nx) && from != null ? nx - from : POLL_MIN;
+            Object.assign(Limits, { payload, at: nowMs(), nextAt: nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait)) });
+            Limits.validUntil = Limits.nextAt + LIMITS_KEEP;
+            secureSet(LIMITS_STORAGE_KEY, JSON.stringify({ playerId: ownPlayerId, payload, at: toStored(Limits.at),
+                nextAt: toStored(Limits.nextAt), validUntil: toStored(Limits.validUntil) })).catch(() => {});
         } catch (e) {
-            if (gen === Limits.gen) {
-                Limits.payload = null;
-                Limits.at = 0;
-                Limits.nextAt = nowMs() + RETRY_NET;
-            }
-        } finally {
-            if (gen === Limits.gen) { Limits.inFlight = false; schedule(); }
-        }
-    }
-
-    function blockStartFight(on) {
-        const box = q(document, sel('dialogButtons'));
-        if (!box) return;
-
-        qa(box, 'button').forEach(b => {
-            const text = b.textContent.trim().toLowerCase();
-            if (on && Session.pass() && START_LABELS.includes(text)) setAttr(b, 'data-txm-block', '');
-            else if (b.hasAttribute('data-txm-block')) b.removeAttribute('data-txm-block');
-        });
+            if (gen === Limits.gen) lapse(RETRY_QUICK);
+        } finally { if (gen === Limits.gen) { Limits.inFlight = false; schedule(); } }
     }
 
     function chip(row, cls, text, attrs) {
@@ -1960,14 +1622,18 @@
     }
 
     function renderLimits() {
+        guardStartFight();                                  // first, and whether or not the bar is drawn
         const bar = q(document, '.txm-fa-bar');
         if (!bar) return;
+        const hold = Hold.unlocked ? 'Start Fight could not be found to pause it. Do not attack until the war limits show.' : HOLD_TEXT[Hold.reason] || '';
+        setShown(q(bar, '.txm-fa-hold'), !!hold); setLiveText(q(bar, '.txm-fa-hold'), hold);
         const row = q(bar, '.txm-fa-limits'), warnRow = q(bar, '.txm-fa-warn');
         const result = Analysis.display('limits');
         const view = result && result.limits;
         const unavailable = !!(view && view.visible && !Limits.payload);
-        const analysisFailed = Analysis.nextTryAt > 0;
-        const signature = JSON.stringify([view, unavailable, Limits.authFailed, Limits.inFlight, analysisFailed]);
+        const analysisFailed = Analysis.nextTryAt > 0 || (!!Analysis.rejected && Analysis.rejected === Analysis.observed);
+        const refused = Limits.authFailed || WarRoom.refused;
+        const signature = JSON.stringify([view, unavailable, refused, Limits.inFlight, analysisFailed, !!hold]);
         if (signature !== limitsSig) {
             limitsSig = signature;
             setShown(row, !!(view && view.visible && !unavailable));
@@ -2004,15 +1670,15 @@
             let warning = '';
             if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
             else if (view.pending) warning = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.';
-            else if (view.visible && Limits.authFailed) warning = 'War limits key rejected. Save your Torn API key in Settings to retry.';
-            else if (unavailable) warning = Limits.inFlight ? '' : 'War limits unavailable. Retrying…';
+            // A paused Start Fight already explains missing limits in the hold row.
+            else if (view.visible && refused) warning = hold ? '' : 'War limits key rejected. Save your Torn API key in Settings to retry.';
+            else if (unavailable) warning = Limits.inFlight || hold ? '' : 'War limits unavailable. Retrying…';
             else if (view.reason) warning = 'Warning: ' + view.reason;
             setShown(warnRow, !!warning); setLiveText(warnRow, warning);
         }
         const age = q(row, '.txm-fa-age');
         setLiveText(age, Limits.at ? 'updated ' + Math.round((nowMs() - Limits.at) / 1000) + 's ago' : 'no data');
         setAttr(age, 'data-stale', !Limits.at || nowMs() - Limits.at > STALE_AFTER ? '1' : '0');
-        blockStartFight(Analysis.blocked());
     }
 
     // #endregion
@@ -2026,34 +1692,12 @@
         Analysis.reset();
         await secureDelete(SESSION_STORAGE_KEY);
         await saveApiKey(v);
-
-        // A new key invalidates everything derived from the old one, including
-        // any response still in flight (generation bump).
-        storeDel(STORAGE_JWT);
-        storeDel(STORAGE_WAR);
-        storeDel(STORAGE_LIMITS);
-        Limits.authFailed = false;
-        Limits.rejects = 0;
-        Limits.payload = null;
-        Limits.at = 0;
-        Limits.nextAt = 0;
-        Limits.gen++;
-        War.state = 'idle';
-        War.ranked = null;
-        War.rosterId = null;
-        War.roster = null;
-        War.oppId = null;
-        War.oppName = null;
-        War.startAt = 0;
-        War.retryAt = 0;
-        War.gen++;
-        WarRoom.reset();
+        // A new key invalidates everything derived from the old one, including any response still in
+        // flight (generation bump); onSessionChange tears down what the old key showed and redraws.
+        forgetMember();
         playerId = null;
-        limitsSig = '';
-        barSig = '';                                        // back-to-faction link keys off the war target
         Session.reset();
         onSessionChange();
-        schedule();
         void Session.refresh();
     }
 
@@ -2068,11 +1712,7 @@
                 const b = r.data && r.data.basic;
                 setStatus(b ? `✓ Valid - ${b.name} [${b.id}]` : '✓ Valid key', 'ok');
             }
-        } catch (e) {
-            setStatus('✗ Connection error', 'bad');
-        } finally {
-            btn.disabled = false;
-        }
+        } catch (e) { setStatus('✗ Connection error', 'bad'); } finally { btn.disabled = false; }
     }
 
     let escClose = null;
@@ -2089,10 +1729,7 @@
 
     function openSettings(trigger) {
         const existing = document.getElementById('txm-fa-settings');
-        if (existing) {
-            q(existing, '.txm-fa-set-input')?.focus();
-            return;
-        }
+        if (existing) { q(existing, '.txm-fa-set-input')?.focus(); return; }
         settingsTrigger = trigger || document.activeElement;
 
         const FEATURES = [
@@ -2155,10 +1792,7 @@
         input.value = apiKey();                             // property write - never interpolated into HTML
 
         const status = q(modal, '.txm-fa-set-status');
-        const setStatus = (text, state) => {
-            status.textContent = text;
-            setAttr(status, 'data-state', state || '');
-        };
+        const setStatus = (text, state) => { status.textContent = text; setAttr(status, 'data-state', state || ''); };
         if (validKey(apiKey())) setStatus('✓ API key configured', 'ok');
 
         input.addEventListener('input', () => delAttr(input, 'data-bad'));
@@ -2172,13 +1806,7 @@
             }
             delAttr(input, 'data-bad');
             setStatus('Saving…', 'wait');
-            try {
-                await applyApiKey(v);
-                setStatus(v ? '✓ Key saved' : 'No API key set', v ? 'ok' : '');
-            } catch (e) {
-                setAttr(input, 'data-bad', '1');
-                setStatus('✗ Protected storage unavailable', 'bad');
-            }
+            try { await applyApiKey(v); setStatus(v ? '✓ Key saved' : 'No API key set', v ? 'ok' : ''); } catch (e) { setAttr(input, 'data-bad', '1'); setStatus('✗ Protected storage unavailable', 'bad'); }
         };
 
         modal.addEventListener('click', (e) => {
@@ -2317,63 +1945,26 @@
 
     let wasAuthorized = false;
 
+    // A lapsed session removes the protected presentation. War data, limits and the ZZCraft login
+    // outlive it: only a key change or a denial forgets them, and the war hold still decides Start Fight.
     function teardownAuthorized() {
         Analysis.reset();
-        const attributes = [
-            'data-txm-block', 'data-txm-hide', 'data-txm-warn', 'data-txm-label',
-            'data-txm-disarm', 'data-txm-disarm-label', 'data-txm-dialog',
-            'data-txm-temp', 'data-txm-helmet'
-        ];
-        attributes.forEach(attribute => {
-            qa(document, `[${attribute}]`).forEach(element => element.removeAttribute(attribute));
-        });
+        ['data-txm-hide', 'data-txm-warn', 'data-txm-label', 'data-txm-disarm', 'data-txm-disarm-label', 'data-txm-dialog']
+            .forEach(attribute => qa(document, `[${attribute}]`).forEach(element => element.removeAttribute(attribute)));
         qa(document, 'a.txm-fa-namelink').forEach(anchor => anchor.replaceWith(...anchor.childNodes));
-
         const bar = q(document, '.txm-fa-bar');
         if (bar) setAttr(bar, 'data-txm-mirror', '0');
-        blockStartFight(false);
-
-        storeDel(STORAGE_JWT);
-        storeDel(STORAGE_LIMITS);
-        storeDel(STORAGE_WAR);
-
-        War.state = 'idle';
-        War.ranked = null;
-        War.rosterId = null;
-        War.oppId = null;
-        War.oppName = null;
-        War.roster = null;
-        War.startAt = 0;
-        War.inFlight = false;
-        War.retryAt = 0;
-        War.gen++;
-
-        WarRoom.reset();
-        playerId = null;
-
-        Limits.payload = null;
-        Limits.at = 0;
-        Limits.nextAt = 0;
-        Limits.inFlight = false;
-        Limits.authFailed = false;
-        Limits.rejects = 0;
-        Limits.gen++;
-
         lastHelmet = null;
         lastBonuses = null;
         barSig = '';
         adviceSig = '';
         limitsSig = '';
+        guardStartFight();
     }
 
     function onSessionChange() {
         const authorized = Session.pass();
-        if (authorized && !wasAuthorized) {
-            hydrateLimits();
-            hydrateWar();
-        } else if (!authorized && wasAuthorized) {
-            teardownAuthorized();
-        }
+        if (authorized && !wasAuthorized) { hydrateLimits(); hydrateWar(); } else if (!authorized && wasAuthorized) { teardownAuthorized(); }
         wasAuthorized = authorized;
         styleKey = '';
         schedule();
@@ -2391,16 +1982,10 @@
             defNameCache = { id: null, name: null };
             Analysis.reset();
         }
-        refreshStyle();                                     // first, so the hide rules exist before the bar lands
+        safe('guard', guardStartFight);                     // first: nothing below may delay the war hold
+        refreshStyle();                                     // before the bar, so the hide rules exist when it lands
         safe('topbar', renderTopBar);
-        if (!Session.pass()) {
-            if (wasAuthorized) onSessionChange();
-            safe('auth', () => void Session.refresh());
-            return;
-        }
-        safe('analysis', () => void Analysis.refresh());
-        safe('war-load', () => void loadWar());
-        if (Analysis.current() && Analysis.result.limits.visible) safe('limits-load', () => void loadLimits());
+        if (!refreshData()) return;
         safe('buttons', filterOutcomeButtons);
         safe('dialog', classifyDialog);
         safe('advice', renderAdvice);
@@ -2409,26 +1994,42 @@
         safe('links', linkDefenderNames);
     }
 
+    // War data first (war targets are known even without a session), then login or the checks. Returns
+    // whether the session passes.
+    function refreshData() {
+        safe('war-load', () => void loadWar());
+        if (!Session.pass()) {
+            if (wasAuthorized) onSessionChange();
+            safe('auth', () => void Session.refresh());
+            return false;
+        }
+        safe('analysis', () => void Analysis.refresh());
+        if (safe('limits-want', limitsWanted)) safe('limits-load', () => void loadLimits());
+        return true;
+    }
+
     let queued = false;
 
     function schedule() {
         if (queued) return;
         queued = true;
-        requestAnimationFrame(() => {
-            queued = false;
-            safe('sync', sync);
-        });
+        requestAnimationFrame(() => { queued = false; safe('sync', sync); });
     }
 
     safe('hydrate', hydrateLimits);
+    safe('war', hydrateWar);                                // saved war data holds a target even while the key loads
+
+    // pointer-events:none stops mouse and touch; this capture listener, added before anything that can
+    // fail, also covers keyboard activation, synthetic clicks and a click before the page was checked.
+    document.addEventListener('click', (e) => {
+        safe('click-guard', guardStartFight);
+        const t = e.target;
+        const blocked = t && t.closest && t.closest('[data-txm-block]');
+        if (blocked) { e.preventDefault(); e.stopPropagation(); }
+    }, true);
 
     void loadApiKey()
-        .then(() => {
-            apiKeyLoaded = true;
-            Session.reset();
-            safe('sync', sync);
-            safe('setup', promptForApiKey);
-        })
+        .then(() => { apiKeyLoaded = true; Session.reset(); safe('war', hydrateWar); safe('sync', sync); safe('setup', promptForApiKey); })
         .catch(() => {
             apiKeyLoaded = true;
             authApiKey = '';
@@ -2438,14 +2039,10 @@
             safe('setup', promptForApiKey);
         });
 
-    // The attack UI is entirely client-rendered - observe rather than race it.
-    // attributeFilter catches React className churn and the mobile tab switch.
-    new MutationObserver(schedule).observe(document.body, {
-        childList: true,
-        subtree: true,
-        attributes: true,
-        attributeFilter: ['class']
-    });
+    // The attack UI is entirely client-rendered - observe rather than race it. attributeFilter catches
+    // React className churn and the mobile tab switch. Waits for <body> when injected early.
+    const watch = () => { new MutationObserver(schedule).observe(document.body, { childList: true, subtree: true, attributes: true, attributeFilter: ['class'] }); schedule(); };
+    if (document.body) watch(); else document.addEventListener('DOMContentLoaded', watch, { once: true });
 
     window.addEventListener('resize', schedule);
 
@@ -2455,15 +2052,8 @@
     setInterval(() => {
         nowMs();                                            // notices a PC clock change even while the tab is hidden
         if (document.hidden || !apiKeyLoaded) return;
-        if (!Session.pass()) {
-            if (wasAuthorized) onSessionChange();
-            safe('tick-auth', () => void Session.refresh());
-            safe('tick-authbar', renderTopBar);
-            return;
-        }
-        safe('tick-analysis', () => void Analysis.refresh());
-        safe('tick-war', () => void loadWar());
-        if (Analysis.current() && Analysis.result.limits.visible) safe('tick-limits-load', () => void loadLimits());
+        safe('tick-guard', guardStartFight);
+        if (!refreshData()) { safe('tick-authbar', renderTopBar); return; }
         safe('tick', updateBar);
         safe('tick-limits', renderLimits);                  // drives the nextUpdate-paced poll
         safe('tick-inforow', syncInfoRow);
@@ -2473,14 +2063,6 @@
         if (!document.hidden) safe('visibility-auth', () => void Session.refresh());
         schedule();
     });
-
-    // pointer-events:none stops mouse and touch; the capture-phase listener also
-    // covers keyboard activation and synthetic clicks.
-    document.addEventListener('click', (e) => {
-        const t = e.target;
-        const blocked = t && t.closest && t.closest('[data-txm-block]');
-        if (blocked) { e.preventDefault(); e.stopPropagation(); }
-    }, true);
 
     // #endregion
 
