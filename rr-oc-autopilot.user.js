@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.8
+// @version      2.1.9
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,7 +27,7 @@
 
 	// #region Configuration
 
-	const VERSION = "2.1.8";
+	const VERSION = "2.1.9";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -708,6 +708,8 @@
 		.rr-set-close:hover { color: #fff; }
 		.rr-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
 		.rr-set-section { background: #1a1a1a; border: 1px solid #34373f; border-radius: 6px; padding: 12px; }
+		.rr-set-section + .rr-set-section { margin-top: 12px; }
+		.rr-set-note { color: #8a8d96; font-size: 11px; line-height: 1.45; margin-top: 6px; }
 		.rr-set-title { color: #8a8d96; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 10px; }
 		.rr-set-input { width: 100%; box-sizing: border-box; background: #15161a; color: #d7d9de; border: 1px solid #34373f; border-radius: 5px; padding: 6px 8px; font: inherit; text-align: center; letter-spacing: 2px; margin-bottom: 10px; }
 		.rr-set-input:focus { border-color:${FACTION_COLOURS.accent}; outline: none; }
@@ -1051,6 +1053,14 @@
             <button type="button" class="rr-api" data-action="validate">Validate</button>
             <button type="button" class="rr-api" data-action="remove">Remove</button>
           </div>
+        </div>
+        <div class="rr-set-section">
+          <div class="rr-set-title">How your API key is used</div>
+          <div class="rr-set-note"><b>Storage:</b> your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.</div>
+          <div class="rr-set-note"><b>Sharing:</b> sent to the RR server (membership check) and to ZZCraft (OC thresholds, sent as an X-Api-Key header).</div>
+          <div class="rr-set-note"><b>Purpose:</b> Ruthless Reborn faction organised crime planning.</div>
+          <div class="rr-set-note"><b>Key storage:</b> your userscript manager's storage, or TornPDA's storage.</div>
+          <div class="rr-set-note"><b>Access level:</b> Public Access key only.</div>
         </div>
       </div>
     `);

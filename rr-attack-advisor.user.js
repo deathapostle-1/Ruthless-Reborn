@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.8
+// @version      4.1.9
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -47,7 +47,7 @@
     const SECURE_STORAGE_KEY = 'torn-attack-api-key-v2';
     const SESSION_STORAGE_KEY = 'rr-attack-session-v1';
     const ZZ_STORAGE_KEY = 'rr-attack-zz-v1';               // {keyHash, token} ZZCraft login, kept between attacks
-    const LIMITS_STORAGE_KEY = 'rr-attack-limits-v1';       // {playerId, payload, at, nextAt, validUntil}
+    const LIMITS_STORAGE_KEY = 'rr-attack-limits-v2';       // {playerId, payload, at, dataAt, nextAt, validUntil}
     const STORAGE_WAR = 'torn-attack-war';                  // {factionId, war: {ranked, at}, roster: {oppId, ids, at}}
     const STORAGE_SETTINGS = 'torn-attack-settings';        // {advisor, buttons, outcome, loglinks}
 
@@ -62,7 +62,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.8';                                // keep in step with @version above
+    const VERSION = '4.1.9';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -81,12 +81,12 @@
     const TTL_ROSTER = 10 * 60 * 1000;                      // enemy roster
     const POLL_MIN = 10 * 1000;                             // guard against a bad/missing nextUpdate
     const POLL_MAX = 5 * 60 * 1000;                         // stop an idle page drifting
-    const STALE_AFTER = 30 * 1000;                          // limits figure goes amber past this
     const RETRY_NET = 60 * 1000;                            // back off after a transient failure
     const RETRY_QUICK = 5 * 1000;                           // a network failure retries soon: it pauses war hits
     const WAR_KEEP = 60 * 60 * 1000;                        // last good war data stays usable while refreshes fail
     const LIMITS_KEEP = 60 * 1000;                          // limits stay usable this long past ZZCraft's next update
     const HOLD_GRACE = 10 * 1000;                           // an allowed verdict covers its own renewal this long
+    const HOLD_MAX_MS = 5 * 1000;                           // an unchecked war target is paused at most this long
     const RENEW_LEAD = 3 * 1000;                            // a decision is renewed this long before it runs out
     const REJECTED_RETRY = 10 * 60 * 1000;                  // a key or request refused outright is retried after this
     const STORAGE_TIMEOUT = 10 * 1000;                      // protected storage that does not answer counts as failed
@@ -820,8 +820,8 @@
     function authStatusText() {
         if (!validKey(apiKey())) return 'API key required';
         if (Session.state === 'denied') return 'Access restricted';
-        return (Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…') +
-            (Hold.reason ? ' · Start Fight paused on war targets' : '');
+        const hold = Hold.state === 'warn' ? notEnforcedText() : Hold.state === 'hold' ? HOLD_TEXT : '';
+        return (Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…') + (hold ? ' · ' + hold : '');
     }
 
     function buildAuthBar(head, mount) {
@@ -927,6 +927,8 @@
         startAt: 0,                                         // ms; ranked war start time
         inFlight: false,
         retryAt: 0,
+        failedAt: 0,                                        // last failed Torn lookup, 0 once one succeeds
+        errorCode: null,                                    // Torn's error code from that failure, if any
         gen: 0                                              // bumped on key change; stale responses are discarded
     };
 
@@ -934,7 +936,9 @@
         payload: null,
         at: 0,                                              // when the figure was fetched
         nextAt: 0,                                          // when to poll again
-        validUntil: 0,                                      // the figure may decide a hit until then
+        validUntil: 0,                                      // the figure may allow a hit until then
+        dataAt: 0,                                          // when ZZCraft made the figure (its lastUpdated), on nowMs()
+        failed: false,                                      // the last fetch failed; the figure is kept (hits only rise)
         inFlight: false,
         authFailed: false,                                  // ZZCraft refused the key: retried only after REJECTED_RETRY
         rejects: 0,                                         // consecutive resource 401s; 3 strikes marks authFailed
@@ -956,8 +960,9 @@
     function forgetMember() {
         storeDel(STORAGE_WAR);
         secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
-        Object.assign(War, { state: 'idle', factionId: null, ranked: null, roster: null, rosterId: null, startAt: 0, inFlight: false, retryAt: 0, gen: War.gen + 1 });
-        Object.assign(Limits, { payload: null, at: 0, nextAt: 0, validUntil: 0, inFlight: false, authFailed: false, rejects: 0, gen: Limits.gen + 1 });
+        Object.assign(War, { state: 'idle', factionId: null, ranked: null, roster: null, rosterId: null, startAt: 0, inFlight: false, retryAt: 0,
+            failedAt: 0, errorCode: null, gen: War.gen + 1 });
+        Object.assign(Limits, { payload: null, at: 0, nextAt: 0, validUntil: 0, dataAt: 0, failed: false, inFlight: false, authFailed: false, rejects: 0, gen: Limits.gen + 1 });
         WarRoom.reset();
     }
 
@@ -1136,20 +1141,25 @@
             labels: [], attackType: 1, defenderId: defenderId() ? Number(defenderId()) : null,
             war: { state: War.state, ranked: War.ranked, factionId: Session.factionId || War.factionId,
                 roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster).sort((a, b) => a - b) } : null },
-            limits: Limits.payload && nowMs() < Limits.validUntil ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member } : null
+            limits: Limits.payload ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member,
+                warStart: Limits.payload.warStart, updatedAt: Limits.payload.updatedAt } : null
         };
     }
 
     let unauthorizedAt = -Infinity;                         // last 401 from a protected request
 
+    // What an allowed verdict depends on: this defender, war and limits, apart from ZZCraft's update time.
+    const clearContext = input => JSON.stringify([input.defenderId, input.war, input.limits && { ...input.limits, updatedAt: null }]);
+
     const Analysis = {
         result: null, signature: '', observed: '', pending: false, gen: 0, nextTryAt: 0, expiresAt: 0, renewAt: 0,
         block: null,                                        // a known prohibition: hit cap, no hits, or war not started
         clear: null,                                        // a complete verdict that allows Start Fight
+        unknown: null,                                      // a complete verdict that could not decide, and why
         rejected: '', rejectedUntil: 0,                     // the request the server refused as invalid, and until when
         reset() {
             this.gen++; this.result = null; this.signature = ''; this.observed = ''; this.pending = false; this.nextTryAt = 0;
-            this.expiresAt = 0; this.renewAt = 0; this.block = null; this.clear = null; this.rejected = ''; this.rejectedUntil = 0;
+            this.expiresAt = 0; this.renewAt = 0; this.block = null; this.clear = null; this.unknown = null; this.rejected = ''; this.rejectedUntil = 0;
         },
         current() { return Session.pass() && !!this.result && this.signature === this.observed && nowMs() < this.expiresAt; },
         // Retain presentation during a request only when its relevant observations
@@ -1177,11 +1187,19 @@
         },
         // True while a complete "allowed" verdict still matches this defender, war and limits. It keeps
         // covering Start Fight for HOLD_GRACE past its expiry while its own renewal is in flight.
+        // A newer ZZCraft update with the same figures (only lastUpdated moved on) still allows: hits only rise.
         cleared(input = analysisInput()) {
             const c = this.clear;
             if (!c || !Session.pass() || c.sessionGen !== Session.gen || c.search !== location.search ||
-                c.context !== JSON.stringify([input.defenderId, input.war, input.limits])) return false;
+                c.context !== clearContext(input) || !((input.limits && input.limits.updatedAt) >= c.updatedAt || c.updatedAt == null)) return false;
             return nowMs() < c.until || (this.pending && nowMs() < c.until + HOLD_GRACE);
+        },
+        // Why the server could not decide this defender, war and limits, or ''.
+        undecided(input = analysisInput()) {
+            const u = this.unknown;
+            if (!u || !Session.pass() || u.sessionGen !== Session.gen || u.search !== location.search ||
+                u.context !== JSON.stringify([input.defenderId, input.war, input.limits])) return '';
+            return u.reason || 'unknown';
         },
         async refresh() {
             if (!Session.pass()) return;
@@ -1218,7 +1236,8 @@
                 }
                 if (!response.ok) { this.result = null; this.nextTryAt = nowMs() + retryDelay(response); return; }
                 const result = JSON.parse(response.text);
-                if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt)) throw new Error('Invalid analysis response');
+                if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt) ||
+                    !['blocked', 'allowed', 'unknown'].includes(result.limits.decision)) throw new Error('Invalid analysis response');
                 // revalidateAt is server time: keep this decision until the server clock may reach it,
                 // or for 10 s while server time is not yet known.
                 const revalidate = ServerTime.deadline(result.revalidateAt);
@@ -1232,17 +1251,19 @@
             } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = nowMs() + RETRY_QUICK; } }
             finally { if (gen === this.gen) { this.pending = false; schedule(); } }
         },
-        // Only a complete verdict may set or lift the block, or allow Start Fight: a pre-war verdict,
-        // "not a target" decided with the roster (or with no war), or a war-phase verdict made with limits.
-        // A known prohibition therefore survives equipment and advice renewal for the same war target.
+        // Only a complete verdict may set or lift the block, or allow Start Fight: any verdict on a war target
+        // (the server answers "unknown" rather than "allowed" when the limits are missing), or "not a target"
+        // decided with the roster (or with no war). A known prohibition therefore survives equipment and
+        // advice renewal for the same war target.
         verdict(input, result, until, sessionGen, search) {
             const now = analysisInput(), context = i => JSON.stringify([i.defenderId, i.war, i.limits]);
             if (context(now) !== context(input)) return;
-            const pending = !!result.limits.pending;
-            if (!(result.war.target ? pending || input.limits !== null : input.war.state === 'nowar' || input.war.roster !== null)) return;
-            this.block = result.limits.blocked ? { sessionGen, search, context: JSON.stringify([input.defenderId, input.war]),
+            const pending = !!result.limits.pending, decision = result.limits.decision;
+            if (!(result.war.target || input.war.state === 'nowar' || input.war.roster !== null)) return;
+            this.block = decision === 'blocked' ? { sessionGen, search, context: JSON.stringify([input.defenderId, input.war]),
                 until: pending ? result.war.startAt : Infinity } : null;
-            this.clear = result.limits.blocked ? null : { sessionGen, search, until, context: context(input) };
+            this.clear = decision === 'allowed' ? { sessionGen, search, until, context: clearContext(input), updatedAt: input.limits ? input.limits.updatedAt : null } : null;
+            this.unknown = decision === 'unknown' ? { sessionGen, search, context: context(input), reason: String(result.limits.unknownReason || '') } : null;
         }
     };
 
@@ -1280,36 +1301,80 @@
         return war.roster.ids.includes(input.defenderId) ? 'target' : 'none';
     }
 
-    // Faction rule: Start Fight on a war target stays paused until a complete verdict allows it, however
-    // long that takes. holdReason() says why it is paused, or ''. Members with no key, denied members and
-    // installs with no sign of faction membership (no session and no saved war data) keep Torn's controls.
-    const Hold = { reason: '', unlocked: false };
-    const HOLD_TEXT = {
-        checking: 'Checking war limits… Start Fight paused',
-        war: 'Checking war status… Start Fight paused',
-        limits: 'Waiting for ZZCraft war limits… Start Fight paused',
-        zzcraft: 'ZZCraft rejected your key: Start Fight paused. Save your Torn API key in Settings to retry.',
-        rejected: 'The RR server refused this check: Start Fight paused. Update the script.'
+    // Faction rule: a known prohibition (hit cap, no hits allowed, war not started) always blocks Start Fight.
+    // A war target that cannot be checked is paused while the check runs, for at most HOLD_MAX_MS and only
+    // until a failure is known; then Start Fight opens with a red warning that the limits are NOT enforced.
+    // A failure or the time limit keeps this page's target in "warn" until a decision arrives or the target
+    // changes, so retries during an outage never flip Start Fight between paused and open.
+    // Members with no key, denied members and installs with no sign of faction membership (no session and
+    // no saved war data) keep Torn's controls.
+    const Hold = { reason: '', state: '', cause: '', unlocked: false, context: '', since: 0, failure: '' };
+    const HOLD_TEXT = 'Checking war limits… Start Fight paused';
+    const UNKNOWN_CAUSE = {
+        'limits-other-war': 'Limits not set for this war yet',
+        'hits-stale': 'ZZCraft has no hits for this war yet',
+        'hits-missing': 'ZZCraft has no hits for this war yet'
     };
+    const tornFailure = () => 'Torn war lookup failed' + (War.errorCode != null ? ' (error ' + War.errorCode + ')' : '');
+    const notEnforcedText = () => 'War limits unavailable: NOT enforced. Check your hits.' + (Hold.cause ? ' (' + Hold.cause + ')' : '');
+
+    // A known failure that stops this target being checked, or ''.
+    function holdFailure(input, kind) {
+        if (Session.pass() ? Analysis.nextTryAt > nowMs() : Session.nextTryAt > nowMs()) return 'RR server unavailable';
+        if (Session.pass() && Analysis.rejected && Analysis.rejected === Analysis.observed) return 'RR server refused this check: update the script';
+        if (kind === 'unknown') return War.failedAt ? tornFailure() : '';
+        if (!Session.pass()) return '';
+        const why = Analysis.undecided(input);
+        const limitsMissing = !Limits.payload || nowMs() >= Limits.validUntil;
+        if (limitsMissing && (WarRoom.refused || Limits.authFailed)) return 'ZZCraft rejected your key: save it in Settings';
+        if (limitsMissing && Limits.failed) return 'ZZCraft unavailable';
+        if (why && why !== 'limits-missing') {
+            // Limits from another war or hit counts not yet covering it: a figure fetched before this target was
+            // reached may simply be old (a war just changed), so ask ZZCraft again and decide on its answer.
+            if (Limits.at >= Hold.since || Limits.failed) return UNKNOWN_CAUSE[why] || 'War limits could not be checked';
+            if (!Limits.inFlight && Limits.nextAt > nowMs()) { Limits.nextAt = 0; schedule(); }
+        }
+        return '';
+    }
+
+    // What is still running when the time limit passes without a known failure.
+    function holdTimeout(kind) {
+        if (kind === 'unknown') return 'Torn war lookup not answering';
+        if (!Session.pass() || Analysis.pending) return 'RR server not answering';
+        if (!Limits.payload || Limits.inFlight) return 'ZZCraft not answering';
+        return 'check did not finish';
+    }
+
+    // limit | pending (known prohibitions) | hold | warn | '' and, for warn, why.
+    function holdState() {
+        const none = { state: '', cause: '' };
+        if (apiKeyLoaded ? !validKey(apiKey()) || Session.state === 'denied' : !War.factionId) return none;
+        if (Analysis.blocked()) return { state: Analysis.block.until === Infinity ? 'limit' : 'pending', cause: '' };
+        const input = analysisInput(), kind = warTargetKind(input);
+        if (kind === 'none' || (!Session.pass() && !War.factionId)) return none;
+        // An allowed verdict counts only while its limits are current: kept figures may block, never allow.
+        if (kind === 'target' && Analysis.cleared(input) && !(input.limits && nowMs() >= Limits.validUntil)) return none;
+        const context = JSON.stringify([location.search, input.defenderId, input.war]);
+        if (Hold.context !== context) Object.assign(Hold, { context, since: nowMs(), failure: '' });
+        const failure = holdFailure(input, kind);
+        if (failure) Hold.failure = failure;
+        if (Hold.failure) return { state: 'warn', cause: failure || Hold.failure };
+        if (nowMs() - Hold.since >= HOLD_MAX_MS) return { state: 'warn', cause: holdTimeout(kind) };
+        return { state: 'hold', cause: '' };
+    }
 
     function holdReason() {
-        if (apiKeyLoaded ? !validKey(apiKey()) || Session.state === 'denied' : !War.factionId) return '';
-        if (Analysis.blocked()) return Analysis.block.until === Infinity ? 'limit' : 'pending';
-        const input = analysisInput(), kind = warTargetKind(input);
-        if (kind === 'none' || (!Session.pass() && !War.factionId)) return '';
-        if (kind === 'target' && Analysis.cleared(input)) return '';
-        if (!Session.pass()) return Session.nextTryAt > nowMs() ? 'unavailable' : 'verifying';
-        if (kind === 'unknown') return 'war';
-        if (Analysis.rejected && Analysis.rejected === Analysis.observed) return 'rejected';
-        if (input.limits || !ServerTime.reached(input.war.ranked.start * 1000)) return 'checking';
-        return Limits.authFailed || WarRoom.refused ? 'zzcraft' : 'limits';
+        const h = holdState();
+        if (h.state !== 'hold' && h.state !== 'warn') Hold.context = '';   // a decision ends this target's episode
+        Hold.state = h.state; Hold.cause = h.cause;
+        return h.state === 'warn' ? '' : h.state;
     }
 
     // Applied to every button row, independently of the bar, before anything that could fail or return early.
     function guardStartFight() {
         // Should the check itself fail, a defender on the saved enemy roster stays held.
         let reason = safe('hold', holdReason);
-        if (typeof reason !== 'string') reason = War.roster && War.roster.has(Number(defenderId())) ? 'checking' : '';
+        if (typeof reason !== 'string') { reason = War.roster && War.roster.has(Number(defenderId())) ? 'hold' : ''; Hold.state = reason; Hold.cause = ''; }
         let unlocked = false;
         qa(document, sel('dialogButtons')).forEach(box => {
             setAttr(box, 'translate', 'no');                // browser translation must not rename the buttons matched here
@@ -1357,7 +1422,7 @@
         const res = await crossOriginFetch(TORN_API, 'GET', path, { Authorization: `ApiKey ${key}` });
         let body = null;
         try { body = JSON.parse(res.text); } catch (e) { /* not JSON */ }
-        if (body && body.error) return { error: body.error.error || 'api', code: body.error.code };
+        if (body && body.error) return { error: body.error.error || 'api', code: Number.isSafeInteger(body.error.code) ? body.error.code : null };
         if (!res.ok) return { error: 'http ' + res.status };
         if (body == null) return { error: 'bad response' };
         return { data: body };
@@ -1415,7 +1480,7 @@
             if (!fresh(rec.war, TTL_WAR)) {
                 const r = await tornGet('/faction/wars');
                 if (gen !== War.gen || key !== apiKey()) return;
-                if (r.error) throw new Error('wars: ' + r.error);
+                if (r.error) throw Object.assign(new Error('wars: ' + r.error), { code: r.code });
                 const w = r.data.wars && r.data.wars.ranked;
                 const ranked = w ? { start: w.start, end: w.end || null, factions: w.factions.map(f => ({ id: f.id, name: f.name })) } : null;
                 // The same war keeps its roster, so the block's context does not change under it.
@@ -1425,19 +1490,22 @@
                 if (!same) rec.roster = null;
                 jsonSet(STORAGE_WAR, rec);
             }
+            // War data is current here (fetched now, or by another tab), so a past failure no longer applies.
             // A changed observation must reach analysis before its opponent's roster is fetched.
-            if (applyWarCache(rec) || !War.ranked) return;
+            if (applyWarCache(rec) || !War.ranked) { War.failedAt = 0; War.errorCode = null; return; }
             // The opponent is the other faction in our ranked war, as the server decides it.
             const opp = War.ranked.factions.find(f => f.id !== factionId);
             if (opp && (!fresh(rec.roster, TTL_ROSTER) || rec.roster.oppId !== opp.id)) {
                 const r = await tornGet('/faction/' + opp.id + '/members');
                 if (gen !== War.gen || key !== apiKey()) return;
-                if (r.error) throw new Error('members: ' + r.error);
+                if (r.error) throw Object.assign(new Error('members: ' + r.error), { code: r.code });
                 rec.roster = { oppId: opp.id, ids: (r.data.members || []).map(m => m.id), at: toStored(nowMs()) };
                 jsonSet(STORAGE_WAR, rec); applyWarCache(rec);
             }
-        } catch (_) {
+            War.failedAt = 0; War.errorCode = null;
+        } catch (e) {
             if (gen !== War.gen) return;
+            War.failedAt = nowMs(); War.errorCode = e && e.code != null ? e.code : null;
             // The last good war data stays; only with none at all is the war state unknown.
             if (War.state !== 'war' && War.state !== 'nowar') War.state = 'error';
             War.retryAt = nowMs() + RETRY_NET; schedule();
@@ -1496,19 +1564,23 @@
         });
     }
 
-    // Restores this player's last limits until they fall due, so a fresh attack page (every attack is
-    // one) can be checked at once instead of waiting for ZZCraft.
+    // Restores this player's last limits, so a fresh attack page (every attack is one) can be checked at once.
+    // A figure past its validity is restored too: hits only rise, so it can still block, and an "allowed"
+    // made with it counts as unchecked until ZZCraft answers.
     function hydrateLimits() {
         if (!Session.pass()) return;
         const player = playerId;
         secureGet(LIMITS_STORAGE_KEY).then(text => {
             const rec = JSON.parse(text || 'null'), payload = rec && rec.payload;
             // Only a whole record for this player counts; anything else is ignored, never read as "no limits".
+            const stamp = v => v === null || (Number.isSafeInteger(v) && v >= 0);
             if (!payload || typeof payload !== 'object' || !('currentLimit' in payload) || !('member' in payload) ||
-                rec.playerId !== player || player !== playerId || Limits.payload || !(fromStored(rec.validUntil) > nowMs())) return;
+                !stamp(payload.warStart) || !stamp(payload.updatedAt) || rec.playerId !== player || player !== playerId || Limits.payload ||
+                !Number.isFinite(rec.validUntil) || !Number.isFinite(rec.nextAt) || !Number.isFinite(rec.at)) return;
             const currentLimit = sanitizeCurrentLimit(payload.currentLimit), member = sanitizeMember(payload.member);
             if (currentLimit === undefined || member === undefined) return;
-            Object.assign(Limits, { payload: { currentLimit, member, nextUpdate: null }, at: fromStored(rec.at),
+            Object.assign(Limits, { payload: { currentLimit, member, nextUpdate: null, warStart: payload.warStart, updatedAt: payload.updatedAt },
+                at: fromStored(rec.at), dataAt: Number.isFinite(rec.dataAt) ? fromStored(rec.dataAt) : 0,
                 nextAt: fromStored(rec.nextAt), validUntil: fromStored(rec.validUntil) });
             schedule();
         }).catch(() => {});
@@ -1546,15 +1618,24 @@
         const member = sanitizeMember(rawMember || null);
         if (member === undefined) return null;
 
+        // ZZCraft's /rankedwars/last has no war id: its limits belong to this war only if currentLimit.startTime
+        // equals Torn's war start, and its hit counts cover this war only if lastUpdated is at or after it. The
+        // server decides both; an unreadable time is sent as null (unknown), never guessed.
+        const seconds = v => { const ms = parseZzTime(v); return ms === null ? null : Math.floor(ms / 1000); };
+        const startTime = value.currentLimit && typeof value.currentLimit === 'object' ? value.currentLimit.startTime : null;
         // An unreadable nextUpdate only means "poll again soon"; it never discards the limits.
-        return { currentLimit, member, nextUpdate: Number.isFinite(zzTime(value.nextUpdate)) ? value.nextUpdate : null };
+        return { currentLimit, member, nextUpdate: parseZzTime(value.nextUpdate) === null ? null : value.nextUpdate,
+            warStart: seconds(startTime), updatedAt: seconds(value.lastUpdated) };
     }
 
-    // ZZCraft's times may carry no zone or use a space, which iPhone Safari cannot parse; both mean UTC.
-    function zzTime(value) {
-        if (typeof value !== 'string') return NaN;
-        const plain = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?)$/.exec(value.trim());
-        return Date.parse(plain ? `${plain[1]}T${plain[2]}Z` : value);
+    // ZZCraft's times: ISO YYYY-MM-DD[T ]HH:MM:SS[.frac][Z|±hh:mm]. No zone means UTC (iPhone Safari cannot parse
+    // a space or a missing zone itself). Returns milliseconds, or null for anything else.
+    function parseZzTime(value) {
+        if (typeof value !== 'string') return null;
+        const m = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2})(\.\d+)?(Z|[+-]\d{2}:\d{2})?$/.exec(value.trim());
+        if (!m) return null;
+        const ms = Date.parse(`${m[1]}T${m[2]}${m[3] ? m[3].slice(0, 4) : ''}${m[4] || 'Z'}`);
+        return Number.isFinite(ms) ? ms : null;
     }
 
     function fetchWarRoomLimits(token) {
@@ -1567,8 +1648,9 @@
         const gen = Limits.gen;                             // a key change mid-flight voids this response
         const sessionGen = Session.gen, ownPlayerId = playerId;
         const stale = () => gen !== Limits.gen || sessionGen !== Session.gen || !Session.pass();
-        // On a failure the last figures keep deciding hits only while still valid.
-        const lapse = retry => { if (!(nowMs() < Limits.validUntil)) { Limits.payload = null; Limits.at = 0; } Limits.nextAt = nowMs() + retry; };
+        // On a failure the last figure is kept: war hits only rise, so a block made with it stays right, and an
+        // "allowed" made with it counts as unchecked once it is past its validity (holdState).
+        const lapse = retry => { Limits.failed = true; Limits.nextAt = nowMs() + retry; };
         Limits.inFlight = true;
         try {
             let token = await WarRoom.ensure();
@@ -1600,13 +1682,16 @@
             if (!payload) throw new Error('invalid limits response');
             // Honour the service's own nextUpdate, clamped so a bad value cannot spin us. It is
             // ZZCraft's time, so measure the wait with ZZCraft's clock from the same reply.
-            const nx = zzTime(payload.nextUpdate);
+            const nx = parseZzTime(payload.nextUpdate);
             const stamp = replyTime(res.headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
-            const wait = Number.isFinite(nx) && from != null ? nx - from : POLL_MIN;
-            Object.assign(Limits, { payload, at: nowMs(), nextAt: nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait)) });
+            const wait = nx !== null && from != null ? nx - from : POLL_MIN;
+            // The figure's age is ZZCraft's lastUpdated read against the same reply's clock.
+            const made = parseZzTime(JSON.parse(res.text).lastUpdated);
+            const dataAt = made !== null && from != null ? nowMs() - Math.max(0, from - made) : 0;
+            Object.assign(Limits, { payload, at: nowMs(), dataAt, failed: false, nextAt: nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait)) });
             Limits.validUntil = Limits.nextAt + LIMITS_KEEP;
             secureSet(LIMITS_STORAGE_KEY, JSON.stringify({ playerId: ownPlayerId, payload, at: toStored(Limits.at),
-                nextAt: toStored(Limits.nextAt), validUntil: toStored(Limits.validUntil) })).catch(() => {});
+                dataAt: dataAt ? toStored(dataAt) : 0, nextAt: toStored(Limits.nextAt), validUntil: toStored(Limits.validUntil) })).catch(() => {});
         } catch (e) {
             if (gen === Limits.gen) lapse(RETRY_QUICK);
         } finally { if (gen === Limits.gen) { Limits.inFlight = false; schedule(); } }
@@ -1625,15 +1710,15 @@
         guardStartFight();                                  // first, and whether or not the bar is drawn
         const bar = q(document, '.txm-fa-bar');
         if (!bar) return;
-        const hold = Hold.unlocked ? 'Start Fight could not be found to pause it. Do not attack until the war limits show.' : HOLD_TEXT[Hold.reason] || '';
+        const hold = Hold.unlocked ? 'Start Fight could not be found to pause it. Do not attack until the war limits show.' : Hold.state === 'hold' ? HOLD_TEXT : '';
         setShown(q(bar, '.txm-fa-hold'), !!hold); setLiveText(q(bar, '.txm-fa-hold'), hold);
         const row = q(bar, '.txm-fa-limits'), warnRow = q(bar, '.txm-fa-warn');
         const result = Analysis.display('limits');
         const view = result && result.limits;
         const unavailable = !!(view && view.visible && !Limits.payload);
         const analysisFailed = Analysis.nextTryAt > 0 || (!!Analysis.rejected && Analysis.rejected === Analysis.observed);
-        const refused = Limits.authFailed || WarRoom.refused;
-        const signature = JSON.stringify([view, unavailable, refused, Limits.inFlight, analysisFailed, !!hold]);
+        const tornNote = War.failedAt ? tornFailure() + ': war status may be out of date' : '';
+        const signature = JSON.stringify([view, unavailable, Limits.failed, Limits.inFlight, analysisFailed, hold, Hold.state, Hold.cause, tornNote]);
         if (signature !== limitsSig) {
             limitsSig = signature;
             setShown(row, !!(view && view.visible && !unavailable));
@@ -1668,17 +1753,20 @@
                 }
             }
             let warning = '';
-            if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
+            if (Hold.state === 'warn') warning = notEnforcedText();
+            else if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
             else if (view.pending) warning = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.';
-            // A paused Start Fight already explains missing limits in the hold row.
-            else if (view.visible && refused) warning = hold ? '' : 'War limits key rejected. Save your Torn API key in Settings to retry.';
-            else if (unavailable) warning = Limits.inFlight || hold ? '' : 'War limits unavailable. Retrying…';
+            // No figure to show: say so once a fetch has failed, not while the first one is still running.
+            else if (unavailable) warning = Limits.failed && !Limits.inFlight ? 'War limits unavailable. Retrying…' : '';
             else if (view.reason) warning = 'Warning: ' + view.reason;
+            // A failed Torn lookup is never silent, even while a known block holds or the target is allowed.
+            if (tornNote && !(Hold.state === 'warn' && Hold.cause.startsWith('Torn'))) warning = warning ? warning + ' · ' + tornNote : tornNote;
             setShown(warnRow, !!warning); setLiveText(warnRow, warning);
         }
         const age = q(row, '.txm-fa-age');
-        setLiveText(age, Limits.at ? 'updated ' + Math.round((nowMs() - Limits.at) / 1000) + 's ago' : 'no data');
-        setAttr(age, 'data-stale', !Limits.at || nowMs() - Limits.at > STALE_AFTER ? '1' : '0');
+        // ZZCraft's own data age (RR-13), amber once the figure is overdue or the last fetch failed.
+        setLiveText(age, !Limits.payload ? 'no data' : Limits.dataAt ? 'data ' + Math.max(0, Math.round((nowMs() - Limits.dataAt) / 1000)) + 's old' : 'data age unknown');
+        setAttr(age, 'data-stale', !Limits.payload || !Limits.dataAt || Limits.failed || nowMs() >= Limits.validUntil ? '1' : '0');
     }
 
     // #endregion
@@ -1771,6 +1859,14 @@
                             <button type="button" class="txm-fa-api" data-act="validate">Validate</button>
                             <button type="button" class="txm-fa-api" data-act="remove">Remove</button>
                         </div>
+                    </div>
+                    <div class="txm-fa-set-section">
+                        <div class="txm-fa-set-title">How your API key is used</div>
+                        <div class="txm-fa-set-note"><b>Storage:</b> your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.</div>
+                        <div class="txm-fa-set-note"><b>Sharing:</b> sent to the RR server (to confirm you're in the faction), to ZZCraft (to log in for war limits), and to Torn's official API (war and roster lookups).</div>
+                        <div class="txm-fa-set-note"><b>Purpose:</b> Ruthless Reborn faction war tooling: attack advice and war hit limits.</div>
+                        <div class="txm-fa-set-note"><b>Key storage:</b> your userscript manager's storage, or TornPDA's storage.</div>
+                        <div class="txm-fa-set-note"><b>Access level:</b> Public Access key only.</div>
                     </div>
                 </div>
 
