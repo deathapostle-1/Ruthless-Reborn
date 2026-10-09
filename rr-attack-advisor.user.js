@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.1.9
+// @version      4.2.0
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -47,7 +47,8 @@
     const SECURE_STORAGE_KEY = 'torn-attack-api-key-v2';
     const SESSION_STORAGE_KEY = 'rr-attack-session-v1';
     const ZZ_STORAGE_KEY = 'rr-attack-zz-v1';               // {keyHash, token} ZZCraft login, kept between attacks
-    const LIMITS_STORAGE_KEY = 'rr-attack-limits-v2';       // {playerId, payload, at, dataAt, nextAt, validUntil}
+    const LIMITS_STORAGE_KEY = 'rr-attack-limits-v2';       // {playerId, keyHash, payload, at, dataAt, nextAt, validUntil}
+    const VERDICT_STORAGE_KEY = 'rr-attack-verdict-v1';     // the last war-limits answer: {keyHash, war, limits, updatedAt, decision, reason, validUntil}
     const STORAGE_WAR = 'torn-attack-war';                  // {factionId, war: {ranked, at}, roster: {oppId, ids, at}}
     const STORAGE_SETTINGS = 'torn-attack-settings';        // {advisor, buttons, outcome, loglinks}
 
@@ -62,7 +63,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.1.9';                                // keep in step with @version above
+    const VERSION = '4.2.0';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -237,6 +238,7 @@
     }
 
     let authApiKey = '';
+    let authKeyHash = '';                                   // SHA-256 of the saved key: binds remembered answers to it
     let playerId = null;
     let apiKeyLoaded = false;
 
@@ -244,6 +246,7 @@
     async function loadApiKey() {
         const candidate = await secureGet(SECURE_STORAGE_KEY);
         authApiKey = validKey(candidate) ? candidate : '';
+        authKeyHash = authApiKey ? await keyFingerprint(authApiKey) : '';
         LEGACY_KEYS.forEach(storeDel);
     }
 
@@ -256,6 +259,7 @@
             }
         } else { await secureDelete(SECURE_STORAGE_KEY); }
         authApiKey = value;
+        authKeyHash = value ? await keyFingerprint(value) : '';
     }
 
     function jsonGet(key) { try { return JSON.parse(storeGet(key) || 'null'); } catch (e) { return null; } }
@@ -492,8 +496,11 @@
         const selected = OUTCOME_LABELS[attackType - 1];
         qa(document, sel('dialogButtons')).forEach(box => {
             const buttons = qa(box, 'button'), labels = buttons.map(b => b.textContent.trim().toLowerCase());
-            // Other outcomes are hidden only while the chosen one is on screen, so one always remains.
-            const on = Session.pass() && settings.outcome && labels.includes(selected);
+            // Other outcomes are hidden only once the chosen one has been on screen, so one always remains. After it
+            // is clicked Torn replaces its label while the fight ends; the others stay hidden until the outcome row goes.
+            if (labels.includes(selected)) setAttr(box, 'data-txm-chosen', selected);
+            else if (!labels.some(t => OUTCOME_LABELS.includes(t)) || box.getAttribute('data-txm-chosen') !== selected) delAttr(box, 'data-txm-chosen');
+            const on = Session.pass() && settings.outcome && box.getAttribute('data-txm-chosen') === selected;
             buttons.forEach((b, i) => {
                 if (on && OUTCOME_LABELS.includes(labels[i]) && labels[i] !== selected) setAttr(b, 'data-txm-hide', '');
                 else delAttr(b, 'data-txm-hide');
@@ -820,7 +827,8 @@
     function authStatusText() {
         if (!validKey(apiKey())) return 'API key required';
         if (Session.state === 'denied') return 'Access restricted';
-        const hold = Hold.state === 'warn' ? notEnforcedText() : Hold.state === 'hold' ? HOLD_TEXT : '';
+        const hold = Hold.state === 'warn' ? notEnforcedText() : Hold.state === 'hold' ? HOLD_TEXT
+            : Hold.remembered ? 'Start Fight blocked: ' + Hold.remembered : '';
         return (Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…') + (hold ? ' · ' + hold : '');
     }
 
@@ -960,6 +968,7 @@
     function forgetMember() {
         storeDel(STORAGE_WAR);
         secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
+        Verdict.forget();
         Object.assign(War, { state: 'idle', factionId: null, ranked: null, roster: null, rosterId: null, startAt: 0, inFlight: false, retryAt: 0,
             failedAt: 0, errorCode: null, gen: War.gen + 1 });
         Object.assign(Limits, { payload: null, at: 0, nextAt: 0, validUntil: 0, dataAt: 0, failed: false, inFlight: false, authFailed: false, rejects: 0, gen: Limits.gen + 1 });
@@ -1148,6 +1157,43 @@
 
     let unauthorizedAt = -Infinity;                         // last 401 from a protected request
 
+    // The last war-limits answer for this key. For a war target the server's answer depends only on the war and the
+    // ZZCraft figure, not on which enemy it is, so it decides Start Fight at once on every later attack page with the
+    // same war and figure, without waiting for the RR server or ZZCraft. ZZCraft's figure is trusted as it stands: an
+    // "allowed" lasts until that figure is due to be refreshed (its nextUpdate, plus LIMITS_KEEP); a cap block lasts
+    // for the war, since hits only rise. Any newer, different figure or a live answer replaces it.
+    const warKey = war => war.ranked ? JSON.stringify([war.factionId, war.ranked.start, war.ranked.factions.map(f => f.id)]) : '';
+    const figureKey = limits => JSON.stringify(limits && [limits.currentLimit, limits.member, limits.warStart]);
+    const Verdict = {
+        rec: null,
+        load() {
+            const hash = authKeyHash;
+            secureGet(VERDICT_STORAGE_KEY).then(text => {
+                const rec = JSON.parse(text || 'null');
+                if (!rec || rec.keyHash !== hash || hash !== authKeyHash || !['allowed', 'blocked'].includes(rec.decision) ||
+                    typeof rec.war !== 'string' || typeof rec.limits !== 'string' || !Number.isFinite(rec.validUntil)) return;
+                if (!this.rec) { this.rec = { ...rec, validUntil: fromStored(rec.validUntil) }; schedule(); }
+            }).catch(() => {});
+        },
+        save(input, result) {
+            if (!authKeyHash || !input.limits || !input.war.ranked) return;
+            const decision = result.limits.decision;
+            if (decision !== 'allowed' && decision !== 'blocked') { this.forget(); return; }
+            this.rec = { keyHash: authKeyHash, war: warKey(input.war), limits: figureKey(input.limits), updatedAt: input.limits.updatedAt,
+                decision, reason: String(result.limits.reason || ''), validUntil: Limits.validUntil };
+            secureSet(VERDICT_STORAGE_KEY, JSON.stringify({ ...this.rec, validUntil: toStored(this.rec.validUntil) })).catch(() => {});
+        },
+        forget() { this.rec = null; secureDelete(VERDICT_STORAGE_KEY).catch(() => {}); },
+        // The remembered answer that applies to this war target now, or null.
+        match(input) {
+            const r = this.rec;
+            if (!r || r.keyHash !== authKeyHash || r.war !== warKey(input.war)) return null;
+            // A figure on this page that is not the remembered one (or older) means the answer may have changed.
+            if (input.limits && (figureKey(input.limits) !== r.limits || !(input.limits.updatedAt >= r.updatedAt || r.updatedAt == null))) return null;
+            return r.decision === 'blocked' || nowMs() < r.validUntil ? r : null;
+        }
+    };
+
     // What an allowed verdict depends on: this defender, war and limits, apart from ZZCraft's update time.
     const clearContext = input => JSON.stringify([input.defenderId, input.war, input.limits && { ...input.limits, updatedAt: null }]);
 
@@ -1264,6 +1310,7 @@
                 until: pending ? result.war.startAt : Infinity } : null;
             this.clear = decision === 'allowed' ? { sessionGen, search, until, context: clearContext(input), updatedAt: input.limits ? input.limits.updatedAt : null } : null;
             this.unknown = decision === 'unknown' ? { sessionGen, search, context: context(input), reason: String(result.limits.unknownReason || '') } : null;
+            if (result.war.target && !pending) Verdict.save(input, result);
         }
     };
 
@@ -1308,7 +1355,7 @@
     // changes, so retries during an outage never flip Start Fight between paused and open.
     // Members with no key, denied members and installs with no sign of faction membership (no session and
     // no saved war data) keep Torn's controls.
-    const Hold = { reason: '', state: '', cause: '', unlocked: false, context: '', since: 0, failure: '' };
+    const Hold = { reason: '', state: '', cause: '', unlocked: false, context: '', since: 0, failure: '', remembered: '' };
     const HOLD_TEXT = 'Checking war limits… Start Fight paused';
     const UNKNOWN_CAUSE = {
         'limits-other-war': 'Limits not set for this war yet',
@@ -1354,6 +1401,9 @@
         if (kind === 'none' || (!Session.pass() && !War.factionId)) return none;
         // An allowed verdict counts only while its limits are current: kept figures may block, never allow.
         if (kind === 'target' && Analysis.cleared(input) && !(input.limits && nowMs() >= Limits.validUntil)) return none;
+        // No live answer yet: the remembered one for this war and figure decides at once.
+        const remembered = kind === 'target' && Verdict.match(input);
+        if (remembered) return remembered.decision === 'blocked' ? { state: 'limit', cause: '', remembered: remembered.reason } : none;
         const context = JSON.stringify([location.search, input.defenderId, input.war]);
         if (Hold.context !== context) Object.assign(Hold, { context, since: nowMs(), failure: '' });
         const failure = holdFailure(input, kind);
@@ -1366,7 +1416,7 @@
     function holdReason() {
         const h = holdState();
         if (h.state !== 'hold' && h.state !== 'warn') Hold.context = '';   // a decision ends this target's episode
-        Hold.state = h.state; Hold.cause = h.cause;
+        Hold.state = h.state; Hold.cause = h.cause; Hold.remembered = h.remembered || '';
         return h.state === 'warn' ? '' : h.state;
     }
 
@@ -1568,14 +1618,14 @@
     // A figure past its validity is restored too: hits only rise, so it can still block, and an "allowed"
     // made with it counts as unchecked until ZZCraft answers.
     function hydrateLimits() {
-        if (!Session.pass()) return;
-        const player = playerId;
+        if (!Session.pass() && !authKeyHash) return;
+        const player = Session.pass() ? playerId : null, hash = authKeyHash;
         secureGet(LIMITS_STORAGE_KEY).then(text => {
             const rec = JSON.parse(text || 'null'), payload = rec && rec.payload;
             // Only a whole record for this player counts; anything else is ignored, never read as "no limits".
             const stamp = v => v === null || (Number.isSafeInteger(v) && v >= 0);
             if (!payload || typeof payload !== 'object' || !('currentLimit' in payload) || !('member' in payload) ||
-                !stamp(payload.warStart) || !stamp(payload.updatedAt) || rec.playerId !== player || player !== playerId || Limits.payload ||
+                !stamp(payload.warStart) || !stamp(payload.updatedAt) || (player ? rec.playerId !== player || player !== playerId : rec.keyHash !== hash || hash !== authKeyHash) || Limits.payload ||
                 !Number.isFinite(rec.validUntil) || !Number.isFinite(rec.nextAt) || !Number.isFinite(rec.at)) return;
             const currentLimit = sanitizeCurrentLimit(payload.currentLimit), member = sanitizeMember(payload.member);
             if (currentLimit === undefined || member === undefined) return;
@@ -1690,7 +1740,7 @@
             const dataAt = made !== null && from != null ? nowMs() - Math.max(0, from - made) : 0;
             Object.assign(Limits, { payload, at: nowMs(), dataAt, failed: false, nextAt: nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait)) });
             Limits.validUntil = Limits.nextAt + LIMITS_KEEP;
-            secureSet(LIMITS_STORAGE_KEY, JSON.stringify({ playerId: ownPlayerId, payload, at: toStored(Limits.at),
+            secureSet(LIMITS_STORAGE_KEY, JSON.stringify({ playerId: ownPlayerId, keyHash: authKeyHash, payload, at: toStored(Limits.at),
                 dataAt: dataAt ? toStored(dataAt) : 0, nextAt: toStored(Limits.nextAt), validUntil: toStored(Limits.validUntil) })).catch(() => {});
         } catch (e) {
             if (gen === Limits.gen) lapse(RETRY_QUICK);
@@ -1718,7 +1768,7 @@
         const unavailable = !!(view && view.visible && !Limits.payload);
         const analysisFailed = Analysis.nextTryAt > 0 || (!!Analysis.rejected && Analysis.rejected === Analysis.observed);
         const tornNote = War.failedAt ? tornFailure() + ': war status may be out of date' : '';
-        const signature = JSON.stringify([view, unavailable, Limits.failed, Limits.inFlight, analysisFailed, hold, Hold.state, Hold.cause, tornNote]);
+        const signature = JSON.stringify([view, unavailable, Limits.failed, Limits.inFlight, analysisFailed, hold, Hold.state, Hold.cause, Hold.remembered, tornNote]);
         if (signature !== limitsSig) {
             limitsSig = signature;
             setShown(row, !!(view && view.visible && !unavailable));
@@ -1754,6 +1804,7 @@
             }
             let warning = '';
             if (Hold.state === 'warn') warning = notEnforcedText();
+            else if (!result && Hold.remembered) warning = 'Warning: ' + Hold.remembered;
             else if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
             else if (view.pending) warning = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.';
             // No figure to show: say so once a fetch has failed, not while the first one is still running.
@@ -1787,20 +1838,6 @@
         Session.reset();
         onSessionChange();
         void Session.refresh();
-    }
-
-    async function validateKey(btn, setStatus) {
-        if (!validKey(apiKey())) { setStatus('✗ No valid key saved - Save first', 'bad'); return; }
-        btn.disabled = true;
-        setStatus('Validating…', 'wait');
-        try {
-            const r = await tornGet('/user/basic');
-            if (r.error) setStatus(`✗ ${r.error}`, 'bad');
-            else {
-                const b = r.data && r.data.basic;
-                setStatus(b ? `✓ Valid - ${b.name} [${b.id}]` : '✓ Valid key', 'ok');
-            }
-        } catch (e) { setStatus('✗ Connection error', 'bad'); } finally { btn.disabled = false; }
     }
 
     let escClose = null;
@@ -1856,7 +1893,6 @@
                         <div class="txm-fa-set-status">No API key set</div>
                         <div class="txm-fa-set-actions">
                             <button type="button" class="txm-fa-api" data-act="save">Save</button>
-                            <button type="button" class="txm-fa-api" data-act="validate">Validate</button>
                             <button type="button" class="txm-fa-api" data-act="remove">Remove</button>
                         </div>
                     </div>
@@ -1915,7 +1951,7 @@
                 void applyApiKey('')
                     .then(() => setStatus('Key removed', ''))
                     .catch(() => setStatus('✗ Protected storage unavailable', 'bad'));
-            } else if (act === 'validate') safe('validate', () => validateKey(e.target, setStatus));
+            }
         });
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') void doSave(); });
 
@@ -2125,7 +2161,7 @@
     }, true);
 
     void loadApiKey()
-        .then(() => { apiKeyLoaded = true; Session.reset(); safe('war', hydrateWar); safe('sync', sync); safe('setup', promptForApiKey); })
+        .then(() => { apiKeyLoaded = true; Session.reset(); safe('war', hydrateWar); safe('verdict', () => Verdict.load()); safe('hydrate-key', hydrateLimits); safe('sync', sync); safe('setup', promptForApiKey); })
         .catch(() => {
             apiKeyLoaded = true;
             authApiKey = '';

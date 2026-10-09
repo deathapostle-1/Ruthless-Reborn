@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.1.9
+// @version      2.2.0
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,7 +27,7 @@
 
 	// #region Configuration
 
-	const VERSION = "2.1.9";
+	const VERSION = "2.2.0";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -999,20 +999,6 @@
 		void Gate.refresh();
 	}
 
-	async function validateKey(button, setStatus) {
-		const key = apiKey();
-		if (!validApiKey(key)) { setStatus("No valid key saved - Save first", "bad"); return; }
-
-		button.disabled = true;
-		setStatus("Validating…", "wait");
-		try {
-			await Gate.refresh();
-			if (Gate.pass()) setStatus("Valid and authorized", "ok");
-			else if (Gate.state === "denied") setStatus("Access restricted", "bad");
-			else setStatus("Authorization unavailable", "wait");
-		} catch (e) { setStatus("Connection error", "bad"); } finally { button.disabled = false; }
-	}
-
 	let settingsEscapeHandler = null;
 	let settingsTrigger = null;
 	let settingsGateHook = null;
@@ -1050,7 +1036,6 @@
           <div class="rr-set-status">No API key set</div>
           <div class="rr-set-actions">
             <button type="button" class="rr-api" data-action="save">Save</button>
-            <button type="button" class="rr-api" data-action="validate">Validate</button>
             <button type="button" class="rr-api" data-action="remove">Remove</button>
           </div>
         </div>
@@ -1102,7 +1087,6 @@
 		modal.addEventListener("click", event => {
 			const action = event.target?.getAttribute?.("data-action");
 			if (action === "save") void save();
-			else if (action === "validate") void validateKey(event.target, setStatus);
 			else if (action === "remove") {
 				input.value = "";
 				setStatus("Removing…", "wait");
@@ -1234,9 +1218,27 @@
 		context: null, observations: new Map(),
 		rejected: null, // the request the server refused as invalid; it is not sent again
 		skipped: 0, // OCs on the page left out of the request (past the server's limits)
+		// The last decisions for each tab (context) seen on this page. Switching back to a tab redraws them at once;
+		// OCs whose page data changed since lose theirs and are asked for again, as on any refresh.
+		remembered: new Map(),
 		reset() {
 			this.fingerprint = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false;
-			this.context = null; this.observations.clear(); this.rejected = null; this.skipped = 0;
+			this.context = null; this.observations = new Map(); this.rejected = null; this.skipped = 0; this.remembered.clear();
+		},
+		remember() {
+			if (!this.result || !this.context) return;
+			this.remembered.delete(this.context);
+			this.remembered.set(this.context, { result: this.result, observations: new Map(this.observations), fingerprint: this.fingerprint });
+			while (this.remembered.size > 6) this.remembered.delete(this.remembered.keys().next().value);
+		},
+		recall(input) {
+			const context = this.contextFor(input);
+			if (this.context === context) return false;
+			const saved = this.remembered.get(context);
+			if (!saved) return false;
+			this.result = saved.result; this.observations = new Map(saved.observations); this.fingerprint = saved.fingerprint;
+			this.context = context; this.error = false;
+			return true;
 		},
 		contextFor(input) { return JSON.stringify([location.href, input.tab, input.config, input.roles]); },
 		input(infos, tab) {
@@ -1282,7 +1284,9 @@
 		},
 		async ensure(infos, tab) {
 			if (!Gate.pass()) return;
-			const input = this.input(infos, tab);
+			let input = this.input(infos, tab);
+			// Back on a tab seen before: its remembered decisions are drawn now, before any request.
+			if (this.recall(input)) { input = this.input(infos, tab); this.reconcile(infos, input); this.draw(infos, tab); }
 			const fp = JSON.stringify(input);
 			this.reconcile(infos, input);
 			// Decisions already held stay drawn while a request is out, cooling down or refused.
@@ -1302,6 +1306,7 @@
 				this.fingerprint = fp; this.result = result; this.error = false; this.nextTryAt = 0; this.rejected = null;
 				this.context = this.contextFor(input);
 				this.observations = new Map(input.panels.map(p => [p.ocId, JSON.stringify(p)]));
+				this.remember();
 				// OCs that changed while the request was out lose their decision and are asked for again.
 				const current = qa(document, "div[data-oc-id]").map(parsePanel), tabNow = activeTab();
 				this.reconcile(current, this.input(current, tabNow));
