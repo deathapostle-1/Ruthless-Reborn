@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.2.0
+// @version      2.2.1
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,7 +27,7 @@
 
 	// #region Configuration
 
-	const VERSION = "2.2.0";
+	const VERSION = "2.2.1";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -52,7 +52,7 @@
 	const MAX_REQUEST_BYTES = 120 * 1024; // and at most 128 KB; this leaves headroom
 	const REJECTED_RETRY_MS = 10 * 60 * 1000; // a request the server refused as invalid waits this long
 	const STORAGE_TIMEOUT_MS = 10 * 1000; // protected storage that does not answer counts as failed
-	const LOCK_TIMEOUT_MS = 30 * 1000; // another tab's login is not waited for longer than this
+	const LOCK_TIMEOUT_MS = 3 * 1000; // another tab's login is not waited for longer than this
 
 	// #endregion
 
@@ -259,6 +259,8 @@
 				headers: hdrs,
 				data,
 				timeout: timeoutMs,
+				// Lets Tampermonkey send requests side by side (its issue #2215); none of these services redirects.
+				redirect: "manual",
 				onload: (r) => resolve(reply(r)),
 				onerror: reject,
 				ontimeout: () => reject(new Error("timeout")),

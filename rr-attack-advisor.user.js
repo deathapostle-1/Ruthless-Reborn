@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.0
+// @version      4.2.1
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -10,6 +10,7 @@
 // @match        https://www.torn.com/loader.php?sid=attack*
 // @match        https://www.torn.com/page.php?*&sid=attack*
 // @match        https://www.torn.com/loader.php?*&sid=attack*
+// @match        https://www.torn.com/factions.php*
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -63,7 +64,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.0';                                // keep in step with @version above
+    const VERSION = '4.2.1';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -91,7 +92,7 @@
     const RENEW_LEAD = 3 * 1000;                            // a decision is renewed this long before it runs out
     const REJECTED_RETRY = 10 * 60 * 1000;                  // a key or request refused outright is retried after this
     const STORAGE_TIMEOUT = 10 * 1000;                      // protected storage that does not answer counts as failed
-    const LOCK_TIMEOUT = 30 * 1000;                         // another tab's login is not waited for longer than this
+    const LOCK_TIMEOUT = 3 * 1000;                          // another tab's login is not waited for longer than this
 
     // Torn's header labels, discriminated by the icon SVG's viewBox - the label
     // count swings across fight phases and the class strings are identical, so
@@ -238,7 +239,12 @@
     }
 
     let authApiKey = '';
-    let authKeyHash = '';                                   // SHA-256 of the saved key: binds remembered answers to it
+    let authKeyHash = '';
+    let warmUp = false;
+    const Steps = new Map();                                // step still running -> when it started (nowMs)
+    const stepStart = name => Steps.set(name, nowMs());
+    const stepEnd = name => Steps.delete(name);
+    const LOCK_STEP = "waiting for another tab's login";                                     // on the faction page: no interface, only keep the checks ready                                   // SHA-256 of the saved key: binds remembered answers to it
     let playerId = null;
     let apiKeyLoaded = false;
 
@@ -1010,6 +1016,7 @@
         },
         scheduleRefresh() {
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
+            if (warmUp && !(War.state === 'war' && War.ranked)) { this.refreshTimer = null; return; }
             this.refreshTimer = setTimeout(() => void this.refresh(), Math.max(1000, this.renewAt - nowMs()));
         },
         deferRetry(response) {
@@ -1037,7 +1044,10 @@
             const run = async () => {
                 const keyHash = await keyFingerprint(key);
                 if (gen !== this.gen || key !== apiKey()) return;
+                stepEnd(LOCK_STEP);
+                stepStart('reading the saved login');
                 const savedText = await secureGet(SESSION_STORAGE_KEY);
+                stepEnd('reading the saved login');
                 let saved = null;
                 try { saved = typeof savedText === 'string' ? JSON.parse(savedText) : null; } catch (_) { /* invalid record is not a session */ }
                 if (gen !== this.gen || key !== apiKey()) return;
@@ -1051,6 +1061,7 @@
                     this.accept(saved); return;
                 }
                 const sentAt = nowMs();
+                stepStart('RR server login');
                 const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/session',
                     { 'Content-Type': 'application/json' }, JSON.stringify({ apiKey: key, app: 'attack-advisor', clientVersion: VERSION }));
                 if (gen !== this.gen || key !== apiKey()) return;
@@ -1084,12 +1095,16 @@
                 // PDA without this browser API still reuses protected storage within this script instance.
                 if (typeof navigator !== 'undefined' && navigator.locks) {
                     const wait = new AbortController(), timer = setTimeout(() => wait.abort(), LOCK_TIMEOUT);
+                    stepStart(LOCK_STEP);
                     try { await navigator.locks.request('rr-attack-session', { signal: wait.signal }, () => { clearTimeout(timer); return run(); }); }
                     catch (e) { if (!e || e.name !== 'AbortError') throw e; await run(); }
                     finally { clearTimeout(timer); }
                 } else await run();
             } catch (_) { if (gen === this.gen && key === apiKey()) this.deferRetry(); }
-            finally { if (gen === this.gen) this.inFlight = false; }
+            finally {
+                [LOCK_STEP, 'reading the saved login', 'RR server login'].forEach(stepEnd);
+                if (gen === this.gen) this.inFlight = false;
+            }
         }
     };
 
@@ -1156,6 +1171,52 @@
     }
 
     let unauthorizedAt = -Infinity;                         // last 401 from a protected request
+
+    // Faction page (where members launch war hits): with nothing drawn, keep ready what the first attack page would
+    // otherwise wait for - the RR login, the war and enemy roster, ZZCraft's figure and the war-limits answer. All of it
+    // is shared with attack pages through the same storage, so the first attack decides Start Fight at once. Only
+    // while a ranked war has started; otherwise it only refreshes the war data now and then (Torn, member's own key).
+    const WARM_EVERY = 15 * 1000;
+    let warmBusy = false;
+    async function warmTick() {
+        if (warmBusy || !apiKeyLoaded || !validKey(apiKey()) || Session.state === 'denied') return;
+        warmBusy = true;
+        try {
+            if (!War.factionId && !Session.pass()) await Session.refresh();          // once, to learn our faction
+            await loadWar();
+            if (!(War.state === 'war' && War.ranked) || !ServerTime.reached(War.ranked.start * 1000) && ServerTime.usable()) return;
+            if (!Session.pass()) { await Session.refresh(); if (!Session.pass()) return; }
+            if (!ServerTime.reached(War.ranked.start * 1000)) return;                // nothing to remember before the war starts
+            await loadLimits();
+            await warmVerdict();
+        } finally { warmBusy = false; }
+    }
+
+    // Asks the RR server once per ZZCraft figure for the war-target answer (it is the same for every enemy) and
+    // remembers it exactly as an attack page would.
+    async function warmVerdict() {
+        const factionId = Session.factionId || War.factionId, opp = War.ranked && War.ranked.factions.find(f => f.id !== factionId);
+        if (!Session.pass() || !opp || !War.roster || War.rosterId !== opp.id || !War.roster.size || !Limits.payload || !(nowMs() < Limits.validUntil)) return;
+        const ids = Array.from(War.roster).sort((a, b) => a - b);
+        const input = { helmet: null, bonuses: [], temp: null, labels: [], attackType: 1, defenderId: ids[0],
+            war: { state: War.state, ranked: War.ranked, factionId, roster: { oppId: War.rosterId, ids } },
+            limits: { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member, warStart: Limits.payload.warStart, updatedAt: Limits.payload.updatedAt } };
+        if (Verdict.match(input)) return;
+        const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/attack/analyse',
+            { Authorization: 'Bearer ' + Session.token, 'Content-Type': 'application/json' }, JSON.stringify(input));
+        if (!response.ok) return;
+        const result = JSON.parse(response.text);
+        if (result && result.war && result.war.target && result.limits && !result.limits.pending) Verdict.save(input, result);
+    }
+
+    function startWarmUp() {
+        warmUp = true;
+        const run = () => void warmTick().catch(() => {});
+        void loadApiKey()
+            .then(() => { apiKeyLoaded = true; Session.reset(); hydrateWar(); Verdict.load(); hydrateLimits(); run(); })
+            .catch(() => {});
+        setInterval(run, WARM_EVERY);
+    }
 
     // The last war-limits answer for this key. For a war target the server's answer depends only on the war and the
     // ZZCraft figure, not on which enemy it is, so it decides Start Fight at once on every later attack page with the
@@ -1256,6 +1317,7 @@
                 (signature === this.rejected && nowMs() < this.rejectedUntil)) return;
             const gen = this.gen, sessionGen = Session.gen, token = Session.token, search = location.search;
             this.pending = true;
+            stepStart('RR server check');
             schedule();
             try {
                 const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/attack/analyse',
@@ -1295,7 +1357,7 @@
                 this.result = result; this.signature = signature; this.expiresAt = until; this.nextTryAt = 0;
                 this.renewAt = until - Math.min(RENEW_LEAD, (until - nowMs()) / 2);
             } catch (_) { if (gen === this.gen) { this.result = null; this.nextTryAt = nowMs() + RETRY_QUICK; } }
-            finally { if (gen === this.gen) { this.pending = false; schedule(); } }
+            finally { stepEnd('RR server check'); if (gen === this.gen) { this.pending = false; schedule(); } }
         },
         // Only a complete verdict may set or lift the block, or allow Start Fight: any verdict on a war target
         // (the server answers "unknown" rather than "allowed" when the limits are missing), or "not a target"
@@ -1386,6 +1448,10 @@
 
     // What is still running when the time limit passes without a known failure.
     function holdTimeout(kind) {
+        // The step running longest is what holds things up; its time shows whether it is slow or stuck.
+        let slowest = null;
+        for (const [name, since] of Steps) if (!slowest || since < slowest[1]) slowest = [name, since];
+        if (slowest) return slowest[0] + ' still waiting (' + Math.round((nowMs() - slowest[1]) / 1000) + ' s)';
         if (kind === 'unknown') return 'Torn war lookup not answering';
         if (!Session.pass() || Analysis.pending) return 'RR server not answering';
         if (!Limits.payload || Limits.inFlight) return 'ZZCraft not answering';
@@ -1526,6 +1592,7 @@
         if (rec.factionId !== factionId) { rec.war = null; rec.roster = null; }
         rec.factionId = factionId;
         War.inFlight = true;
+        stepStart('Torn war lookup');
         try {
             if (!fresh(rec.war, TTL_WAR)) {
                 const r = await tornGet('/faction/wars');
@@ -1559,7 +1626,7 @@
             // The last good war data stays; only with none at all is the war state unknown.
             if (War.state !== 'war' && War.state !== 'nowar') War.state = 'error';
             War.retryAt = nowMs() + RETRY_NET; schedule();
-        } finally { if (gen === War.gen) War.inFlight = false; }
+        } finally { stepEnd('Torn war lookup'); if (gen === War.gen) War.inFlight = false; }
     }
 
     // WarRoom limits. TornPDA is a Flutter webview with no GM_* API but its own
@@ -1607,6 +1674,7 @@
                 data: body || null,
                 timeout: timeoutMs,
                 anonymous: true,                            // none of these services uses cookies
+                redirect: 'manual',                         // lets Tampermonkey send requests side by side (its issue #2215)
                 onload: r => resolve(reply(r)),
                 onerror: () => reject(new Error('network')),
                 ontimeout: () => reject(new Error('timeout'))
@@ -1702,6 +1770,7 @@
         // "allowed" made with it counts as unchecked once it is past its validity (holdState).
         const lapse = retry => { Limits.failed = true; Limits.nextAt = nowMs() + retry; };
         Limits.inFlight = true;
+        stepStart('ZZCraft');
         try {
             let token = await WarRoom.ensure();
             if (stale()) return;
@@ -1744,7 +1813,7 @@
                 dataAt: dataAt ? toStored(dataAt) : 0, nextAt: toStored(Limits.nextAt), validUntil: toStored(Limits.validUntil) })).catch(() => {});
         } catch (e) {
             if (gen === Limits.gen) lapse(RETRY_QUICK);
-        } finally { if (gen === Limits.gen) { Limits.inFlight = false; schedule(); } }
+        } finally { stepEnd('ZZCraft'); if (gen === Limits.gen) { Limits.inFlight = false; schedule(); } }
     }
 
     function chip(row, cls, text, attrs) {
@@ -2143,12 +2212,13 @@
     let queued = false;
 
     function schedule() {
-        if (queued) return;
+        if (warmUp || queued) return;
         queued = true;
         requestAnimationFrame(() => { queued = false; safe('sync', sync); });
     }
 
     safe('hydrate', hydrateLimits);
+    if (location.pathname === '/factions.php') { safe('warm-up', startWarmUp); return; }
     safe('war', hydrateWar);                                // saved war data holds a target even while the key loads
 
     // pointer-events:none stops mouse and touch; this capture listener, added before anything that can
