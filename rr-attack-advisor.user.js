@@ -11,6 +11,7 @@
 // @match        https://www.torn.com/page.php?*&sid=attack*
 // @match        https://www.torn.com/loader.php?*&sid=attack*
 // @match        https://www.torn.com/factions.php*
+// @noframes
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -117,6 +118,12 @@
     const ATTACK_NAMES = { [ATTACK.LEAVE]: 'Leave', [ATTACK.MUG]: 'Mug', [ATTACK.HOSP]: 'Hosp' };
     const OUTCOME_LABELS = ['leave', 'mug', 'hospitalize'];
     const START_LABELS = ['start fight', 'start', 'fight', 'attack'];
+
+    // The RR server refuses a whole check that breaks its input limits, so what is sent is trimmed to them first.
+    const MAX_BONUSES = 32;                                 // opponent bonuses per check
+    const MAX_NAME = 200;                                   // helmet, weapon and bonus names
+    const MAX_DESC = 2000;                                  // bonus descriptions
+    const clip = (value, max) => typeof value === 'string' ? value.slice(0, max) : value;
 
     // DOM slot identifiers, not advice rules.
     const WEAPON_SLOT_IDS = new Set(['weapon_main', 'weapon_second', 'weapon_melee', 'weapon_temp']);
@@ -605,10 +612,10 @@
                 const title = (i.getAttribute('data-bonus-attachment-title') || '').trim();
                 if (!title) return;
                 const desc = (i.getAttribute('data-bonus-attachment-description') || '').trim();
-                out.push({ title, desc });   // plain data only - element refs go stale
+                out.push({ title: clip(title, MAX_NAME), desc: clip(desc, MAX_DESC) });   // plain data only - element refs go stale
             });
         });
-        return { state: 'known', bonuses: out };
+        return { state: 'known', bonuses: out.slice(0, MAX_BONUSES) };
     }
 
     // Write-on-change only: the body observer filters attributes to ['class'],
@@ -1178,8 +1185,8 @@
         if (bonuses.state === 'known') lastBonuses = bonuses.bonuses;
         const temp = readOwnTemp(own.weapon_temp);
         return {
-            helmet: lastHelmet, bonuses: lastBonuses || [],
-            temp: temp ? { empty: temp.empty, name: temp.name || null } : null,
+            helmet: clip(lastHelmet, MAX_NAME), bonuses: lastBonuses || [],
+            temp: temp ? { empty: temp.empty, name: clip(temp.name, MAX_NAME) || null } : null,
             // Required by the deployed API; outcome presentation is now entirely local.
             labels: [], attackType: 1, defenderId: defenderId() ? Number(defenderId()) : null,
             war: { state: War.state, ranked: War.ranked, factionId: Session.factionId || War.factionId,
