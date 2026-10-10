@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.2.3
+// @version      2.2.4
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -25,7 +25,7 @@
 (function() {
 	"use strict";
 
-	const VERSION = "2.2.3";
+	const VERSION = "2.2.4";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -129,13 +129,17 @@
 	// A reply's own clock reading, from its Date header.
 	const replyTime = (headers) => Date.parse(headerValue(headers, "date") || "");
 
-	// The sort choice lives in localStorage; one saved in the script manager's store by an older version still reads.
+	// The sort choice is written to the script manager's store and localStorage, so it survives either one failing or
+	// being cleared; the manager's copy is read first.
 	function storeGet(k) {
-		try { const v = localStorage.getItem(k); if (v != null) return v; } catch (e) {}
-		try { return typeof GM_getValue === "function" ? GM_getValue(k, null) : null; } catch (e) { return null; }
+		try { if (typeof GM_getValue === "function") { const v = GM_getValue(k, null); if (v != null) return v; } } catch (e) {}
+		try { return localStorage.getItem(k); } catch (e) { return null; }
 	}
 
-	function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
+	function storeSet(k, v) {
+		try { if (typeof GM_setValue === "function") GM_setValue(k, v); } catch (e) {}
+		try { localStorage.setItem(k, v); } catch (e) {}
+	}
 
 	// Protected storage: TornPDA's own store, else the script manager's (GM_* or GM.*). A store that
 	// does not answer within STORAGE_TIMEOUT_MS counts as failed.

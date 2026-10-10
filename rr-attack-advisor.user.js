@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.3
+// @version      4.2.4
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -9,7 +9,6 @@
 // @match        https://www.torn.com/page.php?sid=attack*
 // @match        https://www.torn.com/page.php?*&sid=attack*
 // @match        https://www.torn.com/factions.php*
-// @noframes
 // @grant        unsafeWindow
 // @grant        GM_xmlhttpRequest
 // @grant        GM.xmlHttpRequest
@@ -57,7 +56,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.3';                                // keep in step with @version above
+    const VERSION = '4.2.4';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -80,6 +79,7 @@
     const RETRY_QUICK = 5 * 1000;                           // a network failure retries soon: it pauses war hits
     const WAR_KEEP = 60 * 60 * 1000;                        // last good war data stays usable while refreshes fail
     const LIMITS_KEEP = 60 * 1000;                          // limits stay usable this long past ZZCraft's next update
+    const LIMITS_AHEAD = POLL_MAX + LIMITS_KEEP + 1000;     // a stored figure or answer is never valid further ahead than this
     const HOLD_GRACE = 10 * 1000;                           // an allowed verdict covers its own renewal this long
     const HOLD_MAX_MS = 5 * 1000;                           // an unchecked war target is paused at most this long
     const RENEW_LEAD = 3 * 1000;                            // a decision is renewed this long before it runs out
@@ -1107,7 +1107,7 @@
                 let saved = null;
                 try { saved = JSON.parse(await secureGet(ZZ_STORAGE_KEY) || 'null'); } catch (_) { /* not a login */ }
                 if (gen !== this.gen || !Session.pass()) return null;
-                if (saved && saved.keyHash === keyHash && zzToken(saved.token)) return (this.token = saved.token);
+                if (saved && saved.keyHash === keyHash && zzToken(saved.token)) { this.refused = false; return (this.token = saved.token); }
                 const response = await crossOriginFetch(ZZCRAFT_API, 'POST', '/auth/login',
                     { 'Content-Type': 'application/json', 'User-Agent': ZZCRAFT_USERAGENT }, JSON.stringify({ apikey: key }));
                 if (gen !== this.gen || !Session.pass()) return null;
@@ -1236,13 +1236,17 @@
     const figureKey = limits => JSON.stringify(limits && [limits.currentLimit, limits.member, limits.warStart]);
     const Verdict = {
         rec: null,
+        gen: 0,                                             // bumped by forget(): a load already reading cannot bring the answer back
         load() {
-            const hash = authKeyHash;
+            const hash = authKeyHash, gen = this.gen;
             secureGet(VERDICT_STORAGE_KEY).then(text => {
                 const rec = JSON.parse(text || 'null');
                 if (!rec || rec.keyHash !== hash || hash !== authKeyHash || !['allowed', 'blocked'].includes(rec.decision) ||
-                    typeof rec.war !== 'string' || typeof rec.limits !== 'string' || !Number.isFinite(rec.validUntil)) return;
-                if (!this.rec) { this.rec = { ...rec, validUntil: fromStored(rec.validUntil) }; schedule(); }
+                    typeof rec.war !== 'string' || typeof rec.limits !== 'string' || !Number.isFinite(rec.validUntil) || gen !== this.gen) return;
+                // An answer valid further ahead than any figure can be was stored before the PC clock was set back.
+                const validUntil = fromStored(rec.validUntil);
+                if (validUntil > nowMs() + LIMITS_AHEAD) return;
+                if (!this.rec) { this.rec = { ...rec, validUntil }; schedule(); }
             }).catch(() => {});
         },
         save(input, result) {
@@ -1253,7 +1257,7 @@
                 decision, reason: String(result.limits.reason || ''), validUntil: Limits.validUntil };
             secureSet(VERDICT_STORAGE_KEY, JSON.stringify({ ...this.rec, validUntil: toStored(this.rec.validUntil) })).catch(() => {});
         },
-        forget() { this.rec = null; secureDelete(VERDICT_STORAGE_KEY).catch(() => {}); },
+        forget() { this.gen++; this.rec = null; secureDelete(VERDICT_STORAGE_KEY).catch(() => {}); },
         // The remembered answer that applies to this war target now, or null.
         match(input) {
             const r = this.rec;
@@ -1307,13 +1311,13 @@
         // A newer ZZCraft update with the same figures (only lastUpdated moved on) still allows: hits only rise.
         cleared(input = analysisInput()) {
             const c = this.clear;
-            if (!this.inScope(c, clearContext(input)) || !((input.limits && input.limits.updatedAt) >= c.updatedAt || c.updatedAt == null)) return false;
+            if (!c || !this.inScope(c, clearContext(input)) || !((input.limits && input.limits.updatedAt) >= c.updatedAt || c.updatedAt == null)) return false;
             return nowMs() < c.until || (this.pending && nowMs() < c.until + HOLD_GRACE);
         },
         // Why the server could not decide this defender, war and limits, or ''.
         undecided(input = analysisInput()) {
             const u = this.unknown;
-            if (!this.inScope(u, JSON.stringify([input.defenderId, input.war, input.limits]))) return '';
+            if (!u || !this.inScope(u, JSON.stringify([input.defenderId, input.war, input.limits]))) return '';
             return u.reason || 'unknown';
         },
         async refresh() {
@@ -1594,7 +1598,7 @@
 
     async function loadWar() {
         const factionId = Session.factionId || War.factionId, key = apiKey();
-        if (!validKey(key) || Session.state === 'denied' || !factionId || War.inFlight || nowMs() < War.retryAt) return;
+        if (keyChanging || !validKey(key) || Session.state === 'denied' || !factionId || War.inFlight || nowMs() < War.retryAt) return;
         const gen = War.gen;
         const rec = readWarCache() || {};
         if (rec.factionId !== factionId) { rec.war = null; rec.roster = null; }
@@ -1702,7 +1706,9 @@
             const stamp = v => v === null || (Number.isSafeInteger(v) && v >= 0);
             if (!payload || typeof payload !== 'object' || !('currentLimit' in payload) || !('member' in payload) ||
                 !stamp(payload.warStart) || !stamp(payload.updatedAt) || (player ? rec.playerId !== player || player !== playerId : rec.keyHash !== hash || hash !== authKeyHash) || Limits.payload ||
-                !Number.isFinite(rec.validUntil) || !Number.isFinite(rec.nextAt) || !Number.isFinite(rec.at)) return;
+                !Number.isFinite(rec.validUntil) || !Number.isFinite(rec.nextAt) || !Number.isFinite(rec.at) ||
+                // Times further ahead than a figure can be were stored before the PC clock was set back.
+                fromStored(rec.validUntil) > nowMs() + LIMITS_AHEAD || fromStored(rec.at) > nowMs()) return;
             const currentLimit = sanitizeCurrentLimit(payload.currentLimit), member = sanitizeMember(payload.member);
             if (currentLimit === undefined || member === undefined) return;
             Object.assign(Limits, { payload: { currentLimit, member, nextUpdate: null, warStart: payload.warStart, updatedAt: payload.updatedAt },
@@ -2010,6 +2016,7 @@
         input.addEventListener('input', () => delAttr(input, 'data-bad'));
 
         const doSave = async () => {
+            if (keyChanging) return;                         // the save already running reports its own result
             const v = input.value.trim();
             if (v && !validKey(v)) {                         // reject typos before transmitting anything
                 setAttr(input, 'data-bad', '1');
@@ -2024,7 +2031,7 @@
         modal.addEventListener('click', (e) => {
             const act = e.target.getAttribute && e.target.getAttribute('data-act');
             if (act === 'save') void doSave();
-            else if (act === 'remove') {
+            else if (act === 'remove' && !keyChanging) {
                 input.value = '';
                 delAttr(input, 'data-bad');
                 setStatus('Removing…', 'wait');
