@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.2.2
+// @version      2.2.3
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -25,9 +25,7 @@
 (function() {
 	"use strict";
 
-	// #region Configuration
-
-	const VERSION = "2.2.2";
+	const VERSION = "2.2.3";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -54,10 +52,6 @@
 	const REJECTED_RETRY_MS = 10 * 60 * 1000; // a request the server refused as invalid waits this long
 	const STORAGE_TIMEOUT_MS = 10 * 1000; // protected storage that does not answer counts as failed
 	const LOCK_TIMEOUT_MS = 3 * 1000; // another tab's login is not waited for longer than this
-
-	// #endregion
-
-	// #region Utilities
 
 	const sel = (prefix) => `[class*="${prefix}___"]`;
 	const q = (root, s) => root.querySelector(s);
@@ -135,22 +129,13 @@
 	// A reply's own clock reading, from its Date header.
 	const replyTime = (headers) => Date.parse(headerValue(headers, "date") || "");
 
-	// #endregion
-
-	// #region Storage
-
-	// Non-sensitive preferences keep their existing compatibility path.
+	// The sort choice lives in localStorage; one saved in the script manager's store by an older version still reads.
 	function storeGet(k) {
-		try {
-			if (typeof GM_getValue === "function") { const v = GM_getValue(k, null); if (v != null) return v; }
-		} catch (e) {}
-		try { return localStorage.getItem(k); } catch (e) { return null; }
+		try { const v = localStorage.getItem(k); if (v != null) return v; } catch (e) {}
+		try { return typeof GM_getValue === "function" ? GM_getValue(k, null) : null; } catch (e) { return null; }
 	}
 
-	function storeSet(k, v) {
-		try { if (typeof GM_setValue === "function") GM_setValue(k, v); } catch (e) {}
-		try { localStorage.setItem(k, v); } catch (e) {}
-	}
+	function storeSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 
 	// Protected storage: TornPDA's own store, else the script manager's (GM_* or GM.*). A store that
 	// does not answer within STORAGE_TIMEOUT_MS counts as failed.
@@ -207,10 +192,6 @@
 	}
 
 	function apiKey() { return authApiKey; }
-
-	// #endregion
-
-	// #region Networking & Data Services
 
 	function requestRaw({ method = "GET", url, body, headers }) {
 		const hdrs = Object.assign(body ? { "Content-Type": "application/json" } : {}, headers || {});
@@ -284,6 +265,11 @@
 	}
 
 	const SESSION_STORAGE = "rr_oc_session_v1";
+	// Saved as JSON text, which every store keeps (TornPDA's included); a record saved as an object by 2.2.2 or older still reads.
+	function parseSession(v) {
+		if (typeof v === "string") { try { v = JSON.parse(v); } catch (e) { return null; } }
+		return v && typeof v === "object" ? v : null;
+	}
 	function retryAfterMs(headers) {
 		const raw = headerValue(headers, "retry-after");
 		if (!raw) return 0;
@@ -354,9 +340,9 @@
 					const current = await secureGet(API_KEY_STORAGE);
 					if (gen !== this.gen || key !== apiKey()) return;
 					if (current !== key) { adoptKey(current); return; }
-					const saved = await secureGet(SESSION_STORAGE);
+					const saved = parseSession(await secureGet(SESSION_STORAGE));
 					if (gen !== this.gen || key !== apiKey()) return;
-					const stored = saved && typeof saved === "object" ? { ...saved, expiresAt: fromStored(saved.expiresAt), renewedAt: fromStored(saved.renewedAt) } : null;
+					const stored = saved ? { ...saved, expiresAt: fromStored(saved.expiresAt), renewedAt: fromStored(saved.renewedAt) } : null;
 					if (stored?.keyFingerprint === fingerprint && (!force || stored.renewedAt + AUTH_REFRESH_MS > nowMs()) && this.accept(stored)) return;
 					const sentAt = nowMs();
 					const response = await requestRaw({ method: "POST", url: AUTH_API + "/v1/session", body: { apiKey: key, app: "oc-autopilot", clientVersion: VERSION } });
@@ -373,7 +359,7 @@
 						const session = { token: data.token, expiresAt: sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS), renewedAt: nowMs(), playerId: data.playerId, factionId: data.factionId, keyFingerprint: fingerprint };
 						if (!this.accept(session)) throw new Error("Invalid authorization response");
 						// Shared with other tabs and later pages; a store that refuses the write only costs them a login.
-						await secureSet(SESSION_STORAGE, { ...session, expiresAt: toStored(session.expiresAt), renewedAt: toStored(session.renewedAt) }).catch(() => {});
+						await secureSet(SESSION_STORAGE, JSON.stringify({ ...session, expiresAt: toStored(session.expiresAt), renewedAt: toStored(session.renewedAt) })).catch(() => {});
 					} else if (response.status === 401 || response.status === 403) {
 						await secureDelete(SESSION_STORAGE);
 						if (gen !== this.gen) return;
@@ -446,16 +432,13 @@
 		if (bar && bar.dataset.mode !== "gate") bar.remove();
 		qa(document, ".rr-meta, .rr-cp, .rr-info, .rr-stat, .rr-lock").forEach((n) => n.remove());
 		qa(document, ".rr-role").forEach((h) => h.classList.remove("rr-role", "rr-item-missing"));
-		qa(
-			document,
-			".rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey",
-		).forEach((w) => w.classList.remove(...FILL));
+		qa(document, FILL_SELECTOR).forEach((w) => w.classList.remove(...FILL));
 		for (const p of qa(document, "div[data-oc-id]")) {
 			p.removeAttribute("aria-busy");
 			delete p.dataset.rrFp;
 			p.style.order = "";
 		}
-		panelNodes.clear();
+		infoRows.clear();
 		restoreNativeEdits(document);
 		const list = listContainer();
 		if (list) { list.style.display = ""; list.style.flexDirection = ""; }
@@ -468,7 +451,7 @@
 		if (panel.getAttribute("aria-busy") !== "true") panel.setAttribute("aria-busy", "true");
 		qa(panel, ".rr-stat, .rr-lock").forEach(n => n.remove());
 		qa(panel, ".rr-role.rr-item-missing").forEach(h => h.classList.remove("rr-item-missing"));
-		qa(panel, ".rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey").forEach(w => {
+		qa(panel, FILL_SELECTOR).forEach(w => {
 			for (const fill of FILL) if (w.classList.contains(fill) !== (fill === "rr-fill-grey")) w.classList.toggle(fill, fill === "rr-fill-grey");
 		});
 		if (!keepRequirements) qa(panel, ".rr-meta .rr-v").forEach(n => { if (n.textContent !== "…") n.textContent = "…"; });
@@ -661,10 +644,6 @@
 		},
 	};
 
-	// #endregion
-
-	// #region Styles
-
 	const STYLE = `
 		.rr-meta { box-sizing: border-box; display: flex; gap: 4px; width: calc(100% - 10px); margin: 5px auto; position: relative; z-index: 1; }
 		.rr-meta .rr-cell { flex: 1; min-width: 0; padding: 3px 4px; border-radius: 4px; text-align: center; background:${FACTION_COLOURS.dark}; border: 1px solid rgba(2, 158, 122, .45); }
@@ -743,9 +722,8 @@
 		body:not(.dark-mode) .rr-legend i { box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); }
 	`;
 
-	// #endregion
-
-	// #region DOM Parsing & Rendering
+	// The Torn id of the member in a slot, from its profile link.
+	const xidOf = (wrap) => q(wrap, 'a[href*="profiles.php?XID="]')?.href.match(/XID=(\d+)/)?.[1] || null;
 
 	function parsePanel(panel) {
 		const title = q(panel, sel("panelTitle"))?.textContent.trim() || "";
@@ -759,14 +737,12 @@
 			const wrap = header.parentElement;
 			const role = q(header, sel("title"))?.textContent.trim() || "";
 			const chance = parseFloat(q(header, sel("successChance"))?.textContent || "");
-			const profile = q(wrap, 'a[href*="profiles.php?XID="]');
-			const xid = profile ? profile.href.match(/XID=(\d+)/)?.[1] : null;
-			return { wrap, header, role, chance: isNaN(chance) ? null : chance, xid };
+			return { wrap, header, role, chance: isNaN(chance) ? null : chance, xid: xidOf(wrap) };
 		});
 		return { panel, ocId: panel.getAttribute("data-oc-id"), title, level, slug, slots };
 	}
 
-	const panelNodes = new Map();
+	const infoRows = new Map(); // ocId -> its success row, put back under the title if React moves it out
 	const nativeContents = new Map();
 	const nativePositions = new Map();
 	const sameChildren = (node, children) => node.childNodes.length === children.length && children.every((child, i) => node.childNodes[i] === child);
@@ -797,21 +773,11 @@
 		}
 	}
 
-	function cacheNode(ocId, kind, node) {
-		if (!ocId) return;
-		let rec = panelNodes.get(ocId);
-		if (!rec) panelNodes.set(ocId, (rec = {}));
-		if (node) rec[kind] = node;
-		else delete rec[kind];
-	}
-
 	function guardPresence() {
-		for (const [ocId, rec] of panelNodes) {
+		for (const [ocId, row] of infoRows) {
 			const panel = document.querySelector(`div[data-oc-id="${ocId}"]`);
 			const titleEl = panel && q(panel, sel("panelTitle"));
-			if (!titleEl) continue;
-			const node = rec.info;
-			if (node && !panel.contains(node)) titleEl.after(node);
+			if (titleEl && !panel.contains(row)) titleEl.after(row);
 		}
 	}
 
@@ -854,7 +820,7 @@
 
 	function renderInfoRow(info, decision) {
 		const { panel, ocId } = info;
-		if (!decision.probability) { panel.querySelector(".rr-info")?.remove(); cacheNode(ocId, "info", null); return; }
+		if (!decision.probability) { panel.querySelector(".rr-info")?.remove(); infoRows.delete(ocId); return; }
 		let row = panel.querySelector(".rr-info") || el("div", "rr-info");
 		let pill = row.querySelector(".rr-success") || el("span", "rr-success");
 		const c = safeColour(decision.successColour);
@@ -865,7 +831,7 @@
 		if (pill.innerHTML !== html) pill.innerHTML = html;
 		if (!row.contains(pill)) row.appendChild(pill);
 		if (!panel.contains(row)) q(panel, sel("panelTitle"))?.after(row);
-		cacheNode(ocId, "info", row);
+		infoRows.set(ocId, row);
 		const query = decision.probability;
 		if (Success.due(query.key)) Success.get(query.scenario, query.params, scheduleRender);
 	}
@@ -877,6 +843,7 @@
 		}
 	};
 	const FILL = ["rr-fill-green", "rr-fill-amber", "rr-fill-red", "rr-fill-grey"];
+	const FILL_SELECTOR = FILL.map((c) => "." + c).join(", ");
 
 	function renderStatusIcon(s, onCompleted) {
 		let icon = s.wrap.querySelector(".rr-stat");
@@ -937,9 +904,7 @@
 		if (!tip.isConnected || !Gate.pass() || !TornApi.members) return;
 		const wrap = slotWrapOf(tooltipTrigger(tip));
 		if (!wrap) return;
-		const xid = wrap
-			.querySelector('a[href*="profiles.php?XID="]')
-			?.href.match(/XID=(\d+)/)?.[1];
+		const xid = xidOf(wrap);
 		const st = xid && TornApi.statusFor(xid);
 		const text = st && statusText(st);
 		if (!text) return;
@@ -979,10 +944,6 @@
 			} else lock?.remove();
 		});
 	}
-
-	// #endregion
-
-	// #region Toolbar & Settings
 
 	function activeTab() {
 		const btn = document.querySelector(`${sel("buttonsContainer")} button${sel("active")}`);
@@ -1125,7 +1086,7 @@
 	}
 
 	const Toolbar = {
-		state: { sort: SORT_OPTIONS.includes(storeGet("rr_oc_sort")) ? storeGet("rr_oc_sort") : "default" },
+		state: { sort: ((s) => SORT_OPTIONS.includes(s) ? s : "default")(storeGet("rr_oc_sort")) },
 		gateMessage() {
 			if (!apiKey()) return "Enter your Torn API key to activate";
 			return Gate.state === "denied" ?
@@ -1196,10 +1157,6 @@
 		}
 	}
 
-	// #endregion
-
-	// #region Panel Processing
-
 	const clip = (v) => typeof v === "string" ? v.slice(0, 160) : "";
 	const digits = (v) => typeof v === "string" && /^\d{1,20}$/.test(v) ? v : null;
 	const byteLength = (text) => new TextEncoder().encode(text).length;
@@ -1223,10 +1180,10 @@
 	}
 
 	// A request fingerprint without its success chances: equal fingerprints here differ only in chances.
-	const sansChances = (fp) => { const input = JSON.parse(fp); input.probabilities = {}; return JSON.stringify(input); };
+	const sansChances = (input) => JSON.stringify({ ...input, probabilities: {} });
 
 	const Analysis = {
-		fingerprint: null, result: null, pending: null, nextTryAt: 0, error: false,
+		fingerprint: null, sans: null, result: null, pending: null, nextTryAt: 0, error: false,
 		sentAt: -Infinity, batchTimer: null, // last request sent; a pending batch of success chances
 		context: null, observations: new Map(),
 		rejected: null, // the request the server refused as invalid; it is not sent again
@@ -1235,13 +1192,13 @@
 		// OCs whose page data changed since lose theirs and are asked for again, as on any refresh.
 		remembered: new Map(),
 		reset() {
-			this.fingerprint = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false;
+			this.fingerprint = null; this.sans = null; this.result = null; this.pending = null; this.nextTryAt = 0; this.error = false;
 			this.context = null; this.observations = new Map(); this.rejected = null; this.skipped = 0; this.remembered.clear();
 		},
 		remember() {
 			if (!this.result || !this.context) return;
 			this.remembered.delete(this.context);
-			this.remembered.set(this.context, { result: this.result, observations: new Map(this.observations), fingerprint: this.fingerprint });
+			this.remembered.set(this.context, { result: this.result, observations: new Map(this.observations), fingerprint: this.fingerprint, sans: this.sans });
 			while (this.remembered.size > 6) this.remembered.delete(this.remembered.keys().next().value);
 		},
 		recall(input) {
@@ -1249,7 +1206,7 @@
 			if (this.context === context) return false;
 			const saved = this.remembered.get(context);
 			if (!saved) return false;
-			this.result = saved.result; this.observations = new Map(saved.observations); this.fingerprint = saved.fingerprint;
+			this.result = saved.result; this.observations = new Map(saved.observations); this.fingerprint = saved.fingerprint; this.sans = saved.sans;
 			this.context = context; this.error = false;
 			return true;
 		},
@@ -1259,6 +1216,10 @@
 		// What the page itself shows for an OC. Crime data arriving or changing re-asks the server, but does not
 		// blank the OC meanwhile.
 		pageView(panel) { return JSON.stringify({ ...panel, crime: null, hasCrimes: null }); },
+		// What an OC needs, apart from who fills it: when this changes its drawn requirements are blanked too.
+		requirements(p) { return JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]); },
+		// Kept per OC once answered, as strings, so each render compares without re-reading JSON.
+		observe(panel) { return { view: this.pageView(panel), requirements: this.requirements(panel) }; },
 		input(infos, tab) {
 			const panels = [], seen = new Set();
 			for (const info of infos) {
@@ -1269,7 +1230,7 @@
 			if (this.context === this.contextFor(input)) {
 				for (const panel of panels) {
 					const before = this.observations.get(panel.ocId);
-					if (!before || this.pageView(JSON.parse(before)) !== this.pageView(panel)) continue;
+					if (!before || before.view !== this.pageView(panel)) continue;
 					const key = this.result?.panels.find(p => p.ocId === panel.ocId)?.probability?.key;
 					if (key && Success.cache.has(key)) input.probabilities[key] = Success.cache.get(key);
 				}
@@ -1288,11 +1249,10 @@
 			if (!this.result) return;
 			const sameContext = this.context === this.contextFor(input);
 			const keep = new Set();
-			const requirements = p => JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]);
 			for (const panel of input.panels) {
 				const before = this.observations.get(panel.ocId);
-				if (sameContext && before && this.pageView(JSON.parse(before)) === this.pageView(panel)) { keep.add(panel.ocId); continue; }
-				const same = sameContext && !!before && requirements(JSON.parse(before)) === requirements(panel);
+				if (sameContext && before && before.view === this.pageView(panel)) { keep.add(panel.ocId); continue; }
+				const same = sameContext && !!before && before.requirements === this.requirements(panel);
 				for (const info of infos) if (info.ocId === panel.ocId) clearPanelDecision(info.panel, same);
 			}
 			const panels = this.result.panels.filter(p => keep.has(p.ocId));
@@ -1317,7 +1277,7 @@
 			// they are sent together at most every PROBABILITY_BATCH_MS instead of re-sending the whole page for each
 			// one; chances already known (nothing left to fetch) go at once.
 			const wait = this.sentAt + PROBABILITY_BATCH_MS - nowMs();
-			if (this.result && this.fingerprint && wait > 0 && Success.draining() && sansChances(fp) === sansChances(this.fingerprint)) {
+			if (this.result && this.fingerprint && wait > 0 && Success.draining() && sansChances(input) === this.sans) {
 				this.draw(infos, tab);
 				if (!this.batchTimer) this.batchTimer = setTimeout(() => { this.batchTimer = null; scheduleRender(); }, wait);
 				return;
@@ -1332,9 +1292,9 @@
 				const result = await requestJson({ method: "POST", url: AUTH_API + "/v1/oc/analyse", headers: { Authorization: `Bearer ${token}` }, body: input });
 				if (gen !== Gate.gen || !Gate.pass() || page !== location.href) return;
 				if (!result || !Array.isArray(result.panels) || !Array.isArray(result.order)) throw new Error("Invalid analysis response");
-				this.fingerprint = fp; this.result = result; this.error = false; this.nextTryAt = 0; this.rejected = null;
+				this.fingerprint = fp; this.sans = sansChances(input); this.result = result; this.error = false; this.nextTryAt = 0; this.rejected = null;
 				this.context = this.contextFor(input);
-				this.observations = new Map(input.panels.map(p => [p.ocId, JSON.stringify(p)]));
+				this.observations = new Map(input.panels.map(p => [p.ocId, this.observe(p)]));
 				this.remember();
 				// OCs that changed while the request was out lose their decision and are asked for again. A drawing
 				// error is the page's, not the server's: it must not mark this good answer as unavailable.
@@ -1389,10 +1349,6 @@
 		},
 	};
 
-	// #endregion
-
-	// #region Lifecycle
-
 	function renderAll(force = false) {
 		if (!apiKeyLoaded) return;
 		const tab = safe("tab", activeTab, null);
@@ -1409,9 +1365,7 @@
 		const panels = qa(document, "div[data-oc-id]");
 		if (force) { panels.forEach((p) => delete p.dataset.rrFp); }
 		const live = new Set(panels.map((p) => p.getAttribute("data-oc-id")));
-		for (const [ocId, rec] of panelNodes) {
-			if (!live.has(ocId) && !rec.info?.isConnected) panelNodes.delete(ocId);
-		}
+		for (const [ocId, row] of infoRows) if (!live.has(ocId) && !row.isConnected) infoRows.delete(ocId);
 		Success.ensureRoles();
 		void Analysis.ensure(panels.map(parsePanel), tab);
 		safe("toolbar", () => Toolbar.ensure(tab));
@@ -1433,8 +1387,7 @@
 		for (const panel of qa(document, "div[data-oc-id]")) {
 			const decision = decisions.get(panel.getAttribute("data-oc-id"));
 			qa(panel, sel("slotHeader")).forEach((header, i) => {
-				const profile = q(header.parentElement, 'a[href*="profiles.php?XID="]');
-				const s = { wrap: header.parentElement, xid: profile ? profile.href.match(/XID=(\d+)/)?.[1] : null };
+				const s = { wrap: header.parentElement, xid: xidOf(header.parentElement) };
 				safe("tick-cp", () => renderCheckpoint(s, decision?.slots[i]?.failed));
 				safe("tick-icon", () => renderStatusIcon(s, onCompleted));
 			});
@@ -1506,5 +1459,4 @@
 		else document.addEventListener("DOMContentLoaded", () => safe("init", start), { once: true });
 	});
 
-	// #endregion
 })();

@@ -1,15 +1,13 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.2
+// @version      4.2.3
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
 // @downloadURL  https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
 // @match        https://www.torn.com/page.php?sid=attack*
-// @match        https://www.torn.com/loader.php?sid=attack*
 // @match        https://www.torn.com/page.php?*&sid=attack*
-// @match        https://www.torn.com/loader.php?*&sid=attack*
 // @match        https://www.torn.com/factions.php*
 // @noframes
 // @grant        unsafeWindow
@@ -30,18 +28,12 @@
 (() => {
     'use strict';
 
-    // #region Metadata
-
     // unsafeWindow is the real page window in both the sandbox and page modes,
     // which keeps the double-injection guard working across PDA re-navigation.
     const PAGE = (typeof unsafeWindow !== 'undefined' && unsafeWindow) || window;
 
     if (PAGE.__txmFastAttack) return;
     PAGE.__txmFastAttack = true;
-
-    // #endregion
-
-    // #region Configuration
 
     const STORAGE_SLOT = 'torn-attack-slot';
     const STORAGE_TYPE = 'torn-attack-type';
@@ -65,7 +57,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.2';                                // keep in step with @version above
+    const VERSION = '4.2.3';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -128,10 +120,6 @@
     // DOM slot identifiers, not advice rules.
     const WEAPON_SLOT_IDS = new Set(['weapon_main', 'weapon_second', 'weapon_melee', 'weapon_temp']);
 
-    // #endregion
-
-    // #region Utilities
-
     // Torn rotates its CSS-module hashes on every redeploy - match the stable prefix.
     const sel = (name) => `[class*="${name}___"]`;
     const q = (root, s) => root ? root.querySelector(s) : null;      // a null root must never widen to document
@@ -193,10 +181,6 @@
     // A reply's own clock reading, from its Date header.
     const replyTime = headers => Date.parse(headerValue(headers, 'date') || '');
 
-    // #endregion
-
-    // #region Storage
-
     function storeGet(key) { try { return localStorage.getItem(key); } catch (e) { return null; } }
 
     function storeSet(key, value) {
@@ -254,6 +238,7 @@
     const LOCK_STEP = "waiting for another tab's login";
     let playerId = null;
     let apiKeyLoaded = false;
+    let keyChanging = false;                                // a key save is running: nothing logs in with the old key meanwhile
 
     // Only read here, never rewritten, so one failed storage write cannot lose a saved key.
     async function loadApiKey() {
@@ -287,10 +272,6 @@
         try { return fn(); } catch (e) { console.error('[RR Attack Advisor]', label, e); }
     }
 
-    // #endregion
-
-    // #region State
-
     let slot = Number(storeGet(STORAGE_SLOT));
     if (!SLOT_NAMES[slot]) slot = SLOT.MELEE;               // corrupt storage must never pick a ghost slot
     let attackType = Number(storeGet(STORAGE_TYPE));
@@ -308,9 +289,6 @@
     let adviceSig = '';                                     // last painted advice-row signature
     let limitsSig = '';                                     // last painted limits/warn signature
     let setupPrompted = false;
-    // #endregion
-
-    // #region Styles
 
     function compact() {
         // Torn's "Desktop View" setting forces the desktop tree on a phone AND
@@ -321,15 +299,8 @@
         return window.innerWidth <= COMPACT_WIDTH;
     }
 
-    function getTopStyle(slotId) {
-        switch (slotId) {
-            case SLOT.PRIMARY: return '35px';
-            case SLOT.SECONDARY: return '135px';
-            case SLOT.MELEE: return '235px';
-            case SLOT.TEMP: return '335px';
-            default: return '235px';
-        }
-    }
+    // The moved buttons sit beside the chosen weapon: 100px per slot, Primary at the top.
+    function getTopStyle(slotId) { return (35 + (slotId - SLOT.PRIMARY) * 100) + 'px'; }
 
     // CSS notes, kept out of the shipped stylesheet:
     // - Header-hide rules only bite while .txm-fa-bar precedes the header AND
@@ -499,16 +470,15 @@
         return header ? header.closest(sel('player')) : null;
     }
 
-    // #endregion
-
-    // #region DOM Parsing & Rendering
-
     // Attack buttons
+
+    // Button text as every check matches it: whitespace collapsed, lower case.
+    const buttonLabels = buttons => buttons.map(b => b.textContent.replace(/\s+/g, ' ').trim().toLowerCase());
 
     function filterOutcomeButtons() {
         const selected = OUTCOME_LABELS[attackType - 1];
         qa(document, sel('dialogButtons')).forEach(box => {
-            const buttons = qa(box, 'button'), labels = buttons.map(b => b.textContent.trim().toLowerCase());
+            const buttons = qa(box, 'button'), labels = buttonLabels(buttons);
             // Other outcomes are hidden only once the chosen one has been on screen, so one always remains. After it
             // is clicked Torn replaces its label while the fight ends; the others stay hidden until the outcome row goes.
             if (labels.includes(selected)) setAttr(box, 'data-txm-chosen', selected);
@@ -527,7 +497,7 @@
         qa(document, sel('dialogWrapper') + '[data-txm-dialog]').forEach(el => {
             if (el !== wrap) delAttr(el, 'data-txm-dialog');
         });
-        const labels = qa(box, 'button').map(b => b.textContent.trim().toLowerCase());
+        const labels = buttonLabels(qa(box, 'button'));
         const state = Session.pass() && (labels.some(t => OUTCOME_LABELS.includes(t)) ? 'outcome'
             : labels.includes('continue') ? 'continue' : labels.some(t => START_LABELS.includes(t)) ? 'start' : '');
         if (state) setAttr(wrap, 'data-txm-dialog', state);
@@ -590,8 +560,7 @@
 
     function readOwnTemp(el) {
         if (!el) return null;
-        if (el.matches(sel('emptySlot'))) return { el, empty: true };
-        return { el, empty: false, name: weaponName(el) };
+        return el.matches(sel('emptySlot')) ? { empty: true } : { empty: false, name: weaponName(el) };
     }
 
     function readDefenderBonuses(defSlots) {
@@ -938,13 +907,9 @@
         }
     }
 
-    // #endregion
-
-    // #region Networking & Data Services
-
     // War data comes from Torn with the member's own key, so war targets are known even while the RR
     // server is unreachable. localStorage shares it between tabs and attack pages (every attack is one).
-    const War = {
+    const WAR_INIT = {
         state: 'idle',                                      // idle | nowar | war | error
         factionId: null,                                    // our faction, from the session or the saved record
         ranked: null,
@@ -954,11 +919,11 @@
         inFlight: false,
         retryAt: 0,
         failedAt: 0,                                        // last failed Torn lookup, 0 once one succeeds
-        errorCode: null,                                    // Torn's error code from that failure, if any
-        gen: 0                                              // bumped on key change; stale responses are discarded
+        errorCode: null                                     // Torn's error code from that failure, if any
     };
+    const War = { ...WAR_INIT, gen: 0 };                    // gen: bumped on key change; stale responses are discarded
 
-    const Limits = {
+    const LIMITS_INIT = {
         payload: null,
         at: 0,                                              // when the figure was fetched
         nextAt: 0,                                          // when to poll again
@@ -967,9 +932,9 @@
         failed: false,                                      // the last fetch failed; the figure is kept (hits only rise)
         inFlight: false,
         authFailed: false,                                  // ZZCraft refused the key: retried only after REJECTED_RETRY
-        rejects: 0,                                         // consecutive resource 401s; 3 strikes marks authFailed
-        gen: 0
+        rejects: 0                                          // consecutive resource 401s; 3 strikes marks authFailed
     };
+    const Limits = { ...LIMITS_INIT, gen: 0 };
 
     function retryDelay(response, fallback = RETRY_NET) {
         const headers = response && response.headers;
@@ -987,9 +952,8 @@
         storeDel(STORAGE_WAR);
         secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
         Verdict.forget();
-        Object.assign(War, { state: 'idle', factionId: null, ranked: null, roster: null, rosterId: null, startAt: 0, inFlight: false, retryAt: 0,
-            failedAt: 0, errorCode: null, gen: War.gen + 1 });
-        Object.assign(Limits, { payload: null, at: 0, nextAt: 0, validUntil: 0, dataAt: 0, failed: false, inFlight: false, authFailed: false, rejects: 0, gen: Limits.gen + 1 });
+        Object.assign(War, WAR_INIT, { gen: War.gen + 1 });
+        Object.assign(Limits, LIMITS_INIT, { gen: Limits.gen + 1 });
         WarRoom.reset();
     }
 
@@ -998,6 +962,7 @@
         secureDelete(SESSION_STORAGE_KEY).catch(() => {});
         secureDelete(LIMITS_STORAGE_KEY).catch(() => {});
         storeDel(STORAGE_WAR);
+        Verdict.forget();
     }
 
     // After the clock jumps forward the session may look spent: renew now rather than at the next timer.
@@ -1020,11 +985,18 @@
             this.state = 'unknown'; this.token = null; this.expiresAt = 0; this.renewAt = 0;
             this.nextTryAt = 0; this.factionId = null;
         },
+        // A session, saved or fresh, is used only if it is whole and its times fit a live session.
         accept(data) {
+            const now = nowMs();
+            if (!data || typeof data.token !== 'string' || !data.token || data.token.length > 8192 ||
+                !Number.isFinite(data.expiresAt) || data.expiresAt <= now + AUTH_EXPIRY_SKEW_MS || data.expiresAt > now + AUTH_MAX_TTL_MS ||
+                !Number.isFinite(data.renewAt) || data.renewAt <= now || data.renewAt >= data.expiresAt ||
+                !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) return false;
             this.token = data.token; this.expiresAt = data.expiresAt; this.renewAt = data.renewAt;
             this.factionId = data.factionId; playerId = data.playerId;
             this.state = 'ok'; this.nextTryAt = 0;
             this.scheduleRefresh(); onSessionChange();
+            return true;
         },
         scheduleRefresh() {
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
@@ -1045,6 +1017,7 @@
         },
         // fresh: log in at the RR server even if a session is held or saved; its reply is what teaches ServerTime.
         async refresh(fresh = false) {
+            if (keyChanging) return;
             const key = apiKey();
             if (!validKey(key)) {
                 if (this.state !== 'denied' || this.token) { this.reset(); this.state = 'denied'; onSessionChange(); }
@@ -1065,14 +1038,7 @@
                 try { saved = typeof savedText === 'string' ? JSON.parse(savedText) : null; } catch (_) { /* invalid record is not a session */ }
                 if (gen !== this.gen || key !== apiKey()) return;
                 if (saved && typeof saved === 'object') saved = { ...saved, expiresAt: fromStored(saved.expiresAt), renewAt: fromStored(saved.renewAt) };
-                if (!fresh && saved && saved.keyHash === keyHash && saved.version === VERSION &&
-                    typeof saved.token === 'string' && saved.token.length > 0 && saved.token.length <= 8192 &&
-                    Number.isFinite(saved.expiresAt) && saved.expiresAt > nowMs() + AUTH_EXPIRY_SKEW_MS &&
-                    saved.expiresAt <= nowMs() + AUTH_MAX_TTL_MS &&
-                    Number.isFinite(saved.renewAt) && saved.renewAt > nowMs() && saved.renewAt < saved.expiresAt &&
-                    Number.isSafeInteger(saved.playerId) && saved.playerId > 0 && Number.isSafeInteger(saved.factionId) && saved.factionId > 0) {
-                    this.accept(saved); return;
-                }
+                if (!fresh && saved && saved.keyHash === keyHash && saved.version === VERSION && this.accept(saved)) return;
                 const sentAt = nowMs();
                 stepStart('RR server login');
                 const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/session',
@@ -1088,12 +1054,9 @@
                     const serverNow = ServerTime.estimate();
                     const lifetime = Number.isFinite(data.expiresIn) ? data.expiresIn * 1000 : serverNow == null ? NaN : Number(data.expiresAt) * 1000 - serverNow;
                     const expiresAt = sentAt + Math.min(lifetime, AUTH_MAX_TTL_MS);
-                    if (typeof data.token !== 'string' || !data.token || data.token.length > 8192 ||
-                        !Number.isFinite(expiresAt) || expiresAt <= nowMs() + AUTH_EXPIRY_SKEW_MS || expiresAt > nowMs() + AUTH_MAX_TTL_MS ||
-                        !Number.isSafeInteger(data.playerId) || data.playerId < 1 || !Number.isSafeInteger(data.factionId) || data.factionId < 1) throw new Error('Invalid authorization response');
                     const record = { token: data.token, expiresAt, renewAt: Math.min(nowMs() + AUTH_REFRESH_MS, expiresAt - AUTH_EXPIRY_SKEW_MS),
                         playerId: data.playerId, factionId: data.factionId, keyHash, version: VERSION };
-                    this.accept(record);
+                    if (!this.accept(record)) throw new Error('Invalid authorization response');
                     // Shared with other tabs and later pages; a store that refuses the write only costs them a login.
                     await secureSet(SESSION_STORAGE_KEY, JSON.stringify({ ...record, expiresAt: toStored(record.expiresAt), renewAt: toStored(record.renewAt) })).catch(() => {});
                 } else if (response.status === 401 || response.status === 403) {
@@ -1176,6 +1139,13 @@
         try { return fn(); } finally { if (--inputPass === 0) inputSnapshot = null; }
     }
 
+    // The war and limits parts of a check, shared by attack pages and the faction-page warm-up so both ask the same question.
+    function warInput() {
+        return { state: War.state, ranked: War.ranked, factionId: Session.factionId || War.factionId,
+            roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster).sort((a, b) => a - b) } : null };
+    }
+    const limitsInput = p => p ? { currentLimit: p.currentLimit, member: p.member, warStart: p.warStart, updatedAt: p.updatedAt } : null;
+
     function readAnalysisInput() {
         const { own, def } = weaponSlotBuckets();
         const helmet = readHelmet();
@@ -1189,10 +1159,7 @@
             temp: temp ? { empty: temp.empty, name: clip(temp.name, MAX_NAME) || null } : null,
             // Required by the deployed API; outcome presentation is now entirely local.
             labels: [], attackType: 1, defenderId: defenderId() ? Number(defenderId()) : null,
-            war: { state: War.state, ranked: War.ranked, factionId: Session.factionId || War.factionId,
-                roster: War.roster ? { oppId: War.rosterId, ids: Array.from(War.roster).sort((a, b) => a - b) } : null },
-            limits: Limits.payload ? { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member,
-                warStart: Limits.payload.warStart, updatedAt: Limits.payload.updatedAt } : null
+            war: warInput(), limits: limitsInput(Limits.payload)
         };
     }
 
@@ -1223,12 +1190,9 @@
     // Asks the RR server once per ZZCraft figure for the war-target answer (it is the same for every enemy) and
     // remembers it exactly as an attack page would.
     async function warmVerdict() {
-        const factionId = Session.factionId || War.factionId, opp = War.ranked && War.ranked.factions.find(f => f.id !== factionId);
-        if (!Session.pass() || !opp || !War.roster || War.rosterId !== opp.id || !War.roster.size || !Limits.payload || !(nowMs() < Limits.validUntil)) return;
-        const ids = Array.from(War.roster).sort((a, b) => a - b);
-        const input = { helmet: null, bonuses: [], temp: null, labels: [], attackType: 1, defenderId: ids[0],
-            war: { state: War.state, ranked: War.ranked, factionId, roster: { oppId: War.rosterId, ids } },
-            limits: { currentLimit: Limits.payload.currentLimit, member: Limits.payload.member, warStart: Limits.payload.warStart, updatedAt: Limits.payload.updatedAt } };
+        const war = warInput(), opp = War.ranked && War.ranked.factions.find(f => f.id !== war.factionId);
+        if (!Session.pass() || !opp || !war.roster || war.roster.oppId !== opp.id || !war.roster.ids.length || !Limits.payload || !(nowMs() < Limits.validUntil)) return;
+        const input = { helmet: null, bonuses: [], temp: null, labels: [], attackType: 1, defenderId: war.roster.ids[0], war, limits: limitsInput(Limits.payload) };
         if (Verdict.match(input)) return;
         const response = await crossOriginFetch(AUTH_API, 'POST', '/v1/attack/analyse',
             { Authorization: 'Bearer ' + Session.token, 'Content-Type': 'application/json' }, JSON.stringify(input));
@@ -1314,6 +1278,8 @@
             this.expiresAt = 0; this.renewAt = 0; this.block = null; this.clear = null; this.unknown = null; this.rejected = ''; this.rejectedUntil = 0;
         },
         current() { return Session.pass() && !!this.result && this.signature === this.observed && nowMs() < this.expiresAt; },
+        // A kept decision applies only within its session and page, and to the same context.
+        inScope(x, context) { return !!x && Session.pass() && x.sessionGen === Session.gen && x.search === location.search && x.context === context; },
         // Retain presentation during a request only when its relevant observations
         // still match. Permission and data acquisition continue to use current().
         display(section) {
@@ -1330,8 +1296,7 @@
             const input = analysisInput();
             // until is the war's start in server time: lift the block only once the server clock has
             // certainly passed it, never on this PC's clock.
-            if (!Session.pass() || this.block.sessionGen !== Session.gen || this.block.search !== location.search ||
-                ServerTime.reached(this.block.until) || this.block.context !== JSON.stringify([input.defenderId, input.war])) {
+            if (!this.inScope(this.block, JSON.stringify([input.defenderId, input.war])) || ServerTime.reached(this.block.until)) {
                 this.block = null;
                 return false;
             }
@@ -1342,15 +1307,13 @@
         // A newer ZZCraft update with the same figures (only lastUpdated moved on) still allows: hits only rise.
         cleared(input = analysisInput()) {
             const c = this.clear;
-            if (!c || !Session.pass() || c.sessionGen !== Session.gen || c.search !== location.search ||
-                c.context !== clearContext(input) || !((input.limits && input.limits.updatedAt) >= c.updatedAt || c.updatedAt == null)) return false;
+            if (!this.inScope(c, clearContext(input)) || !((input.limits && input.limits.updatedAt) >= c.updatedAt || c.updatedAt == null)) return false;
             return nowMs() < c.until || (this.pending && nowMs() < c.until + HOLD_GRACE);
         },
         // Why the server could not decide this defender, war and limits, or ''.
         undecided(input = analysisInput()) {
             const u = this.unknown;
-            if (!u || !Session.pass() || u.sessionGen !== Session.gen || u.search !== location.search ||
-                u.context !== JSON.stringify([input.defenderId, input.war, input.limits])) return '';
+            if (!this.inScope(u, JSON.stringify([input.defenderId, input.war, input.limits]))) return '';
             return u.reason || 'unknown';
         },
         async refresh() {
@@ -1389,7 +1352,7 @@
                 }
                 if (!response.ok) { this.result = null; this.nextTryAt = nowMs() + retryDelay(response); return; }
                 const result = JSON.parse(response.text);
-                if (!result || !result.advice || !result.buttons || !result.war || !result.limits || !Number.isFinite(result.revalidateAt) ||
+                if (!result || !result.advice || !result.war || !result.limits || !Number.isFinite(result.revalidateAt) ||
                     !['blocked', 'allowed', 'unknown'].includes(result.limits.decision)) throw new Error('Invalid analysis response');
                 // revalidateAt is server time: keep this decision until the server clock may reach it,
                 // or for 10 s while server time is not yet known.
@@ -1442,7 +1405,7 @@
 
     function warTarget() {
         const war = Analysis.current() && Analysis.result.war;
-        return war && war.target ? { oppId: war.oppId, pending: war.phase === 'pending' } : null;
+        return war && war.target ? { oppId: war.oppId } : null;
     }
 
     // Whether this defender is an enemy in the current war, by the same rule the server uses.
@@ -1462,7 +1425,7 @@
     // changes, so retries during an outage never flip Start Fight between paused and open.
     // Members with no key, denied members and installs with no sign of faction membership (no session and
     // no saved war data) keep Torn's controls.
-    const Hold = { reason: '', state: '', cause: '', unlocked: false, context: '', since: 0, failure: '', remembered: '' };
+    const Hold = { state: '', cause: '', unlocked: false, context: '', since: 0, failure: '', remembered: '' };
     const HOLD_TEXT = 'Checking war limits… Start Fight paused';
     const UNKNOWN_CAUSE = {
         'limits-other-war': 'Limits not set for this war yet',
@@ -1540,7 +1503,7 @@
         qa(document, sel('dialogButtons')).forEach(box => {
             setAttr(box, 'translate', 'no');                // browser translation must not rename the buttons matched here
             const buttons = qa(box, 'button');
-            const labels = buttons.map(b => b.textContent.replace(/\s+/g, ' ').trim().toLowerCase());
+            const labels = buttonLabels(buttons);
             const other = t => OUTCOME_LABELS.includes(t) || t === 'continue';
             buttons.forEach((b, i) => {
                 // While paused, a lone button that is not an outcome or Continue is Start Fight in any wording.
@@ -1549,7 +1512,7 @@
             });
             if (reason && buttons.length > 1 && !labels.some(t => START_LABELS.includes(t) || other(t))) unlocked = true;
         });
-        Hold.reason = reason; Hold.unlocked = unlocked;
+        Hold.unlocked = unlocked;
     }
 
     // Limits are needed once a decision shows them, or as soon as the defender is a known target in a
@@ -1832,6 +1795,8 @@
             if (stale()) return;
 
             if (res.status === 401 || res.status === 403) {
+                // A re-login ZZCraft refused keeps its refusal and its wait, so the member is told to fix the key.
+                if (WarRoom.refused) { lapse(REJECTED_RETRY); return; }
                 Limits.rejects++;
                 Limits.authFailed = Limits.rejects >= 3;
                 WarRoom.reset();
@@ -1842,7 +1807,8 @@
             Limits.rejects = 0;
             Limits.authFailed = false;
 
-            const payload = sanitizeLimitsPayload(JSON.parse(res.text), ownPlayerId);
+            const body = JSON.parse(res.text);
+            const payload = sanitizeLimitsPayload(body, ownPlayerId);
             if (!payload) throw new Error('invalid limits response');
             // Honour the service's own nextUpdate, clamped so a bad value cannot spin us. It is
             // ZZCraft's time, so measure the wait with ZZCraft's clock from the same reply.
@@ -1850,7 +1816,7 @@
             const stamp = replyTime(res.headers), from = Number.isFinite(stamp) ? stamp : ServerTime.estimate();
             const wait = nx !== null && from != null ? nx - from : POLL_MIN;
             // The figure's age is ZZCraft's lastUpdated read against the same reply's clock.
-            const made = parseZzTime(JSON.parse(res.text).lastUpdated);
+            const made = parseZzTime(body.lastUpdated);
             const dataAt = made !== null && from != null ? nowMs() - Math.max(0, from - made) : 0;
             Object.assign(Limits, { payload, at: nowMs(), dataAt, failed: false, nextAt: nowMs() + Math.max(POLL_MIN, Math.min(POLL_MAX, wait)) });
             Limits.validUntil = Limits.nextAt + LIMITS_KEEP;
@@ -1934,17 +1900,17 @@
         setAttr(age, 'data-stale', !Limits.payload || !Limits.dataAt || Limits.failed || nowMs() >= Limits.validUntil ? '1' : '0');
     }
 
-    // #endregion
-
-    // #region Settings
-
     // Settings panel (structure derived from Smart Stock Vault's settings cog)
 
     async function applyApiKey(v) {
-        Session.reset();
-        Analysis.reset();
-        await secureDelete(SESSION_STORAGE_KEY);
-        await saveApiKey(v);
+        if (keyChanging) throw new Error('API key change already in progress');
+        keyChanging = true;
+        try {
+            Session.reset();
+            Analysis.reset();
+            await secureDelete(SESSION_STORAGE_KEY);
+            await saveApiKey(v);
+        } finally { keyChanging = false; }
         // A new key invalidates everything derived from the old one, including any response still in
         // flight (generation bump); onSessionChange tears down what the old key showed and redraws.
         forgetMember();
@@ -2106,10 +2072,6 @@
         openSettings(q(document, '.txm-fa-gear'));
     }
 
-    // #endregion
-
-    // #region Extras
-
     // Attack-log name links
 
     // Keyed to the defender id so a PDA in-place navigation to a new opponent
@@ -2182,10 +2144,6 @@
             }
         });
     }
-
-    // #endregion
-
-    // #region Lifecycle
 
     // Init
 
@@ -2314,7 +2272,5 @@
         if (!document.hidden) safe('visibility-auth', () => void Session.refresh());
         schedule();
     });
-
-    // #endregion
 
 })();
