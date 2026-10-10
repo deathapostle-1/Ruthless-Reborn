@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.1
+// @version      4.2.2
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -64,7 +64,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.1';                                // keep in step with @version above
+    const VERSION = '4.2.2';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -239,12 +239,12 @@
     }
 
     let authApiKey = '';
-    let authKeyHash = '';
-    let warmUp = false;
+    let authKeyHash = '';                                   // SHA-256 of the saved key: binds remembered answers to it
+    let warmUp = false;                                     // on the faction page: no interface, only keep the checks ready
     const Steps = new Map();                                // step still running -> when it started (nowMs)
     const stepStart = name => Steps.set(name, nowMs());
     const stepEnd = name => Steps.delete(name);
-    const LOCK_STEP = "waiting for another tab's login";                                     // on the faction page: no interface, only keep the checks ready                                   // SHA-256 of the saved key: binds remembered answers to it
+    const LOCK_STEP = "waiting for another tab's login";
     let playerId = null;
     let apiKeyLoaded = false;
 
@@ -685,14 +685,19 @@
     function renderAdvice() {
         const { own, def } = weaponSlotBuckets();
         const advice = settings.advisor && Analysis.display('advice')?.advice;
+        // Each part is read on its own, so an answer missing one still paints the rest and clears stale marks.
+        const tags = advice && advice.tags && typeof advice.tags === 'object' ? advice.tags : {};
+        const disarm = advice && Array.isArray(advice.disarmSlots) ? advice.disarmSlots : [];
+        const chips = advice && Array.isArray(advice.chips)
+            ? advice.chips.filter(c => c && typeof c.text === 'string' && typeof c.level === 'string') : [];
         Object.entries(own).forEach(([id, el]) => {
-            const tag = advice && advice.tags[id];
+            const tag = tags[id];
             tagSlot(el, tag && tag.level, tag && tag.tag);
-            tagDisarm(el, !!(advice && advice.disarmSlots.includes(id)));
+            tagDisarm(el, disarm.includes(id));
         });
         def.forEach(el => tagSlot(el, null));
         // Request failures are reported once in the shared warning row.
-        renderAdviceRow(advice ? advice.chips : []);
+        renderAdviceRow(chips);
     }
 
     // Top bar
@@ -1016,7 +1021,7 @@
         },
         scheduleRefresh() {
             if (this.refreshTimer) clearTimeout(this.refreshTimer);
-            if (warmUp && !(War.state === 'war' && War.ranked)) { this.refreshTimer = null; return; }
+            if (warmUp && (!(War.state === 'war' && War.ranked) || document.hidden)) { this.refreshTimer = null; return; }
             this.refreshTimer = setTimeout(() => void this.refresh(), Math.max(1000, this.renewAt - nowMs()));
         },
         deferRetry(response) {
@@ -1031,13 +1036,14 @@
             this.refreshTimer = setTimeout(() => void this.refresh(), delay);
             onSessionChange();
         },
-        async refresh() {
+        // fresh: log in at the RR server even if a session is held or saved; its reply is what teaches ServerTime.
+        async refresh(fresh = false) {
             const key = apiKey();
             if (!validKey(key)) {
                 if (this.state !== 'denied' || this.token) { this.reset(); this.state = 'denied'; onSessionChange(); }
                 return;
             }
-            if (this.pass() && nowMs() < this.renewAt) return;
+            if (!fresh && this.pass() && nowMs() < this.renewAt) return;
             if (this.inFlight || nowMs() < this.nextTryAt) return;
             const gen = this.gen;
             this.inFlight = true;
@@ -1052,7 +1058,7 @@
                 try { saved = typeof savedText === 'string' ? JSON.parse(savedText) : null; } catch (_) { /* invalid record is not a session */ }
                 if (gen !== this.gen || key !== apiKey()) return;
                 if (saved && typeof saved === 'object') saved = { ...saved, expiresAt: fromStored(saved.expiresAt), renewAt: fromStored(saved.renewAt) };
-                if (saved && saved.keyHash === keyHash && saved.version === VERSION &&
+                if (!fresh && saved && saved.keyHash === keyHash && saved.version === VERSION &&
                     typeof saved.token === 'string' && saved.token.length > 0 && saved.token.length <= 8192 &&
                     Number.isFinite(saved.expiresAt) && saved.expiresAt > nowMs() + AUTH_EXPIRY_SKEW_MS &&
                     saved.expiresAt <= nowMs() + AUTH_MAX_TTL_MS &&
@@ -1150,7 +1156,20 @@
         }
     };
 
+    // The fight screen is read once per synchronous pass (a sync, a tick, a click): the hold, the checks and the
+    // drawing all ask for it several times, and nothing in one pass can change it. A reply handled later is a new
+    // task, outside the pass, and reads afresh.
+    let inputPass = 0, inputSnapshot = null;
     function analysisInput() {
+        if (!inputPass) return readAnalysisInput();
+        return inputSnapshot || (inputSnapshot = readAnalysisInput());
+    }
+    function inOnePass(fn) {
+        inputPass++;
+        try { return fn(); } finally { if (--inputPass === 0) inputSnapshot = null; }
+    }
+
+    function readAnalysisInput() {
         const { own, def } = weaponSlotBuckets();
         const helmet = readHelmet();
         if (helmet.state === 'known') lastHelmet = helmet.helmet;
@@ -1186,6 +1205,8 @@
             await loadWar();
             if (!(War.state === 'war' && War.ranked) || !ServerTime.reached(War.ranked.start * 1000) && ServerTime.usable()) return;
             if (!Session.pass()) { await Session.refresh(); if (!Session.pass()) return; }
+            // A session reused from storage made no request here, so server time is still unknown: one login teaches it.
+            if (!ServerTime.usable()) { await Session.refresh(true); if (!Session.pass()) return; }
             if (!ServerTime.reached(War.ranked.start * 1000)) return;                // nothing to remember before the war starts
             await loadLimits();
             await warmVerdict();
@@ -1209,13 +1230,30 @@
         if (result && result.war && result.war.target && result.limits && !result.limits.pending) Verdict.save(input, result);
     }
 
+    // Only a visible faction tab warms up, and only one at a time: the first visible tab holds the 'rr-attack-warm'
+    // Web Lock until it is hidden or closed, and the others leave the shared storage to it. Without Web Locks (TornPDA,
+    // one tab) every visible tick runs.
+    let warmLease = null, warmAsking = false;
+    function warmStep() {
+        const run = () => void warmTick().catch(() => {});
+        if (document.hidden) { if (warmLease) { warmLease(); warmLease = null; } return; }
+        if (warmLease || typeof navigator === 'undefined' || !navigator.locks) { run(); return; }
+        if (warmAsking) return;
+        warmAsking = true;
+        navigator.locks.request('rr-attack-warm', { ifAvailable: true }, lock => {
+            warmAsking = false;
+            if (!lock || document.hidden) return null;
+            return new Promise(release => { warmLease = release; run(); });
+        }).catch(() => { warmAsking = false; });
+    }
+
     function startWarmUp() {
         warmUp = true;
-        const run = () => void warmTick().catch(() => {});
         void loadApiKey()
-            .then(() => { apiKeyLoaded = true; Session.reset(); hydrateWar(); Verdict.load(); hydrateLimits(); run(); })
+            .then(() => { apiKeyLoaded = true; Session.reset(); hydrateWar(); Verdict.load(); hydrateLimits(); warmStep(); })
             .catch(() => {});
-        setInterval(run, WARM_EVERY);
+        setInterval(() => { if (apiKeyLoaded) warmStep(); }, WARM_EVERY);
+        document.addEventListener('visibilitychange', () => { if (apiKeyLoaded) warmStep(); });
     }
 
     // The last war-limits answer for this key. For a war target the server's answer depends only on the war and the
@@ -2174,7 +2212,9 @@
     // TornPDA navigates in place, so every page-scoped cache keys off the URL.
     let lastSearch = location.search;
 
-    function sync() {
+    function sync() { inOnePass(syncPass); }
+
+    function syncPass() {
         if (!apiKeyLoaded) return;
         if (location.search !== lastSearch) {               // new opponent, same script instance
             lastSearch = location.search;
@@ -2224,7 +2264,7 @@
     // pointer-events:none stops mouse and touch; this capture listener, added before anything that can
     // fail, also covers keyboard activation, synthetic clicks and a click before the page was checked.
     document.addEventListener('click', (e) => {
-        safe('click-guard', guardStartFight);
+        safe('click-guard', () => inOnePass(guardStartFight));
         const t = e.target;
         const blocked = t && t.closest && t.closest('[data-txm-block]');
         if (blocked) { e.preventDefault(); e.stopPropagation(); }
@@ -2254,11 +2294,13 @@
     setInterval(() => {
         nowMs();                                            // notices a PC clock change even while the tab is hidden
         if (document.hidden || !apiKeyLoaded) return;
-        safe('tick-guard', guardStartFight);
-        if (!refreshData()) { safe('tick-authbar', renderTopBar); return; }
-        safe('tick', updateBar);
-        safe('tick-limits', renderLimits);                  // drives the nextUpdate-paced poll
-        safe('tick-inforow', syncInfoRow);
+        inOnePass(() => {
+            safe('tick-guard', guardStartFight);
+            if (!refreshData()) { safe('tick-authbar', renderTopBar); return; }
+            safe('tick', updateBar);
+            safe('tick-limits', renderLimits);              // drives the nextUpdate-paced poll
+            safe('tick-inforow', syncInfoRow);
+        });
     }, 1000);
 
     document.addEventListener('visibilitychange', () => {

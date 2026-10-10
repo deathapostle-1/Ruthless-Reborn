@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.2.1
+// @version      2.2.2
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -27,7 +27,7 @@
 
 	// #region Configuration
 
-	const VERSION = "2.2.1";
+	const VERSION = "2.2.2";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -48,6 +48,7 @@
 	const PUMP_DELAY_MS = 250; // Success queue pacing between requests
 	const SUCCESS_RETRY_MS = 5 * 1000; // a failed success chance is tried again after 5 s, then 10 s
 	const SUCCESS_FAILED_MS = 5 * 60 * 1000; // one that still failed is asked for again after this
+	const PROBABILITY_BATCH_MS = 2000; // success chances arriving together are sent to the server at most this often
 	const MAX_PANELS = 100; // the server takes at most 100 OCs per request
 	const MAX_REQUEST_BYTES = 120 * 1024; // and at most 128 KB; this leaves headroom
 	const REJECTED_RETRY_MS = 10 * 60 * 1000; // a request the server refused as invalid waits this long
@@ -581,6 +582,8 @@
 				})
 				.finally(() => { if (this.loading === job) this.loading = null; });
 		},
+		// More chances are on their way now (one in flight or one due), not merely waiting out a retry delay.
+		draining() { const now = nowMs(); return this.busy || this.queue.some((j) => j.retryAt <= now); },
 		due(key) { return !this.cache.has(key) || (this.cache.get(key) === null && nowMs() >= this.failedAt.get(key)); },
 		get(scenario, params, cb) {
 			const key = scenario + "|" + params.join(",");
@@ -812,26 +815,28 @@
 		}
 	}
 
+	// Server values reach innerHTML below, so each is reduced to a finite number or a fixed colour first: a bad or
+	// compromised answer then shows "--" or grey, never markup.
+	const finite = (v) => (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) && Number.isFinite(Number(v)) ? Number(v) : null;
+	const safeColour = (v) => typeof v === "string" && /^#[0-9a-f]{3,8}$/i.test(v) ? v : "#868e96";
+
 	function renderMeta(slot, decision) {
-		const w = decision.weight;
-		const req = decision.required;
+		const w = finite(decision.weight);
+		const req = finite(decision.required);
 		const html =
 			`<div class="rr-cell"><div class="rr-l">Min</div><div class="rr-v">${req == null ? "--" : req}</div></div>` +
-			`<div class="rr-cell"><div class="rr-l">Weight</div><div class="rr-v">${w == null ? "--.--%" : Number(w).toFixed(2) + "%"}</div></div>`;
+			`<div class="rr-cell"><div class="rr-l">Weight</div><div class="rr-v">${w == null ? "--.--%" : w.toFixed(2) + "%"}</div></div>`;
 		const old = slot.wrap.querySelector(".rr-meta");
 		if (old) {
 			if (old.innerHTML !== html) old.innerHTML = html;
 		} else slot.wrap.appendChild(el("div", "rr-meta", html));
 	}
 
-	function renderCheckpoint(slot) {
-		const ocId = slot.wrap
-			.closest("div[data-oc-id]")
-			?.getAttribute("data-oc-id");
+	// failed is the server's decision for this slot; callers look their OC up once, not once per slot.
+	function renderCheckpoint(slot, failed = false) {
 		const ring = slot.wrap.querySelector(sel("planning"));
 		const deg = ring && (ring.getAttribute("style") || "").match(/([\d.]+)deg/);
-		const index = qa(slot.wrap.closest("div[data-oc-id]"), sel("slotHeader")).findIndex(h => h.parentElement === slot.wrap);
-		const failed = Analysis.result?.panels.find(p => p.ocId === ocId)?.slots[index]?.failed || false;
+		failed = failed === true;
 		let bar = slot.wrap.querySelector(".rr-cp");
 		if (!failed && !deg) { bar?.remove(); return; }
 		if (!bar) {
@@ -852,9 +857,10 @@
 		if (!decision.probability) { panel.querySelector(".rr-info")?.remove(); cacheNode(ocId, "info", null); return; }
 		let row = panel.querySelector(".rr-info") || el("div", "rr-info");
 		let pill = row.querySelector(".rr-success") || el("span", "rr-success");
-		const c = decision.successColour || "#868e96";
+		const c = safeColour(decision.successColour);
 		pill.style.setProperty("--rr-c", c);
-		const result = Analysis.error ? "unavailable" : decision.success == null ? (Success.cache.has(decision.probability.key) ? "n/a" : "…") : (decision.success * 100).toFixed(2) + "%";
+		const success = finite(decision.success);
+		const result = Analysis.error ? "unavailable" : success == null ? (Success.cache.has(decision.probability.key) ? "n/a" : "…") : (success * 100).toFixed(2) + "%";
 		const html = `<span class="rr-pip" style="background:${c}"></span>Success: ${result}`;
 		if (pill.innerHTML !== html) pill.innerHTML = html;
 		if (!row.contains(pill)) row.appendChild(pill);
@@ -966,7 +972,8 @@
 			let lock = s.wrap.querySelector(".rr-lock");
 			if (d.locked) {
 				relative(s.wrap);
-				const html = `<span>Not Eligible: Requires: ${d.required}+</span>`;
+				const required = finite(d.required);
+				const html = `<span>Not Eligible: Requires: ${required == null ? "--" : required}+</span>`;
 				if (!lock) s.wrap.appendChild(el("div", "rr-lock", html));
 				else if (lock.innerHTML !== html) lock.innerHTML = html;
 			} else lock?.remove();
@@ -1215,8 +1222,12 @@
 			}) };
 	}
 
+	// A request fingerprint without its success chances: equal fingerprints here differ only in chances.
+	const sansChances = (fp) => { const input = JSON.parse(fp); input.probabilities = {}; return JSON.stringify(input); };
+
 	const Analysis = {
 		fingerprint: null, result: null, pending: null, nextTryAt: 0, error: false,
+		sentAt: -Infinity, batchTimer: null, // last request sent; a pending batch of success chances
 		context: null, observations: new Map(),
 		rejected: null, // the request the server refused as invalid; it is not sent again
 		skipped: 0, // OCs on the page left out of the request (past the server's limits)
@@ -1242,7 +1253,12 @@
 			this.context = context; this.error = false;
 			return true;
 		},
-		contextFor(input) { return JSON.stringify([location.href, input.tab, input.config, input.roles]); },
+		// Thresholds and role names are not part of the context: when they arrive, the decisions already drawn stay up
+		// until the answer that uses them replaces them, rather than every OC blanking at once.
+		contextFor(input) { return JSON.stringify([location.href, input.tab]); },
+		// What the page itself shows for an OC. Crime data arriving or changing re-asks the server, but does not
+		// blank the OC meanwhile.
+		pageView(panel) { return JSON.stringify({ ...panel, crime: null, hasCrimes: null }); },
 		input(infos, tab) {
 			const panels = [], seen = new Set();
 			for (const info of infos) {
@@ -1252,7 +1268,8 @@
 			const input = { tab: tab === null ? null : clip(tab), sort: Toolbar.state.sort, config: Config.data, roles: Success.roles, probabilities: {}, panels: [] };
 			if (this.context === this.contextFor(input)) {
 				for (const panel of panels) {
-					if (this.observations.get(panel.ocId) !== JSON.stringify(panel)) continue;
+					const before = this.observations.get(panel.ocId);
+					if (!before || this.pageView(JSON.parse(before)) !== this.pageView(panel)) continue;
 					const key = this.result?.panels.find(p => p.ocId === panel.ocId)?.probability?.key;
 					if (key && Success.cache.has(key)) input.probabilities[key] = Success.cache.get(key);
 				}
@@ -1273,8 +1290,8 @@
 			const keep = new Set();
 			const requirements = p => JSON.stringify([p.title, p.slug, p.level, p.slots.map(s => s.role)]);
 			for (const panel of input.panels) {
-				if (sameContext && this.observations.get(panel.ocId) === JSON.stringify(panel)) { keep.add(panel.ocId); continue; }
 				const before = this.observations.get(panel.ocId);
+				if (sameContext && before && this.pageView(JSON.parse(before)) === this.pageView(panel)) { keep.add(panel.ocId); continue; }
 				const same = sameContext && !!before && requirements(JSON.parse(before)) === requirements(panel);
 				for (const info of infos) if (info.ocId === panel.ocId) clearPanelDecision(info.panel, same);
 			}
@@ -1296,11 +1313,21 @@
 				this.draw(infos, tab);
 				return;
 			}
+			// Success chances land one at a time as their queue drains. While it is still draining and only they changed,
+			// they are sent together at most every PROBABILITY_BATCH_MS instead of re-sending the whole page for each
+			// one; chances already known (nothing left to fetch) go at once.
+			const wait = this.sentAt + PROBABILITY_BATCH_MS - nowMs();
+			if (this.result && this.fingerprint && wait > 0 && Success.draining() && sansChances(fp) === sansChances(this.fingerprint)) {
+				this.draw(infos, tab);
+				if (!this.batchTimer) this.batchTimer = setTimeout(() => { this.batchTimer = null; scheduleRender(); }, wait);
+				return;
+			}
 			const gen = Gate.gen;
 			const token = Gate.token;
 			const page = location.href;
 			const job = {};
 			this.pending = job;
+			this.sentAt = nowMs();
 			try {
 				const result = await requestJson({ method: "POST", url: AUTH_API + "/v1/oc/analyse", headers: { Authorization: `Bearer ${token}` }, body: input });
 				if (gen !== Gate.gen || !Gate.pass() || page !== location.href) return;
@@ -1309,10 +1336,13 @@
 				this.context = this.contextFor(input);
 				this.observations = new Map(input.panels.map(p => [p.ocId, JSON.stringify(p)]));
 				this.remember();
-				// OCs that changed while the request was out lose their decision and are asked for again.
-				const current = qa(document, "div[data-oc-id]").map(parsePanel), tabNow = activeTab();
-				this.reconcile(current, this.input(current, tabNow));
-				this.draw(current, tabNow);
+				// OCs that changed while the request was out lose their decision and are asked for again. A drawing
+				// error is the page's, not the server's: it must not mark this good answer as unavailable.
+				safe("draw", () => {
+					const current = qa(document, "div[data-oc-id]").map(parsePanel), tabNow = activeTab();
+					this.reconcile(current, this.input(current, tabNow));
+					this.draw(current, tabNow);
+				});
 			} catch (error) {
 				if (gen !== Gate.gen || page !== location.href) return;
 				if ((error.status === 401 || error.status === 403) && token !== Gate.token) return;
@@ -1338,9 +1368,9 @@
 		draw(infos, tab) {
 			if (!this.result || !Gate.pass()) return;
 			if (!document.body.classList.contains("rr-oc-authorized")) document.body.classList.add("rr-oc-authorized");
-			for (const info of infos) {
+			for (const info of infos) safe("draw-panel", () => {
 				const decision = this.result.panels.find(p => p.ocId === info.ocId);
-				if (!decision || decision.slots.length !== info.slots.length) continue;
+				if (!decision || decision.slots.length !== info.slots.length) return;
 				info.panel.removeAttribute("aria-busy");
 				const fp = JSON.stringify([decision, this.error, info.slots.map(s => s.xid && TornApi.statusFor(s.xid))]);
 				const present = info.slots.every((s, i) => {
@@ -1350,11 +1380,11 @@
 						Boolean(s.wrap.querySelector(".rr-lock")) === Boolean(d.locked) &&
 						FILL.every(fill => s.wrap.classList.contains(fill) === (fill === "rr-fill-" + d.fill));
 				}) && (!decision.probability || info.panel.querySelector(".rr-info .rr-success"));
-				if (info.panel.dataset.rrFp === fp && present) continue;
-				info.panel.dataset.rrFp = fp;
-				info.slots.forEach((s, i) => { renderCheckpoint(s); renderMeta(s, decision.slots[i]); });
+				if (info.panel.dataset.rrFp === fp && present) return;
+				info.slots.forEach((s, i) => { renderCheckpoint(s, decision.slots[i].failed); renderMeta(s, decision.slots[i]); });
 				renderInfoRow(info, decision); renderSlotState(info, decision, tab);
-			}
+				info.panel.dataset.rrFp = fp;               // only once fully drawn, so a failed panel is tried again
+			});
 			applyVisibility();
 		},
 	};
@@ -1399,11 +1429,15 @@
 		safe("torn-api", () => TornApi.refresh());
 		safe("faction-crimes", () => FactionCrimes.refresh());
 		const onCompleted = tab === "Completed";
-		for (const header of qa(document, `div[data-oc-id] ${sel("slotHeader")}`)) {
-			const profile = q(header.parentElement, 'a[href*="profiles.php?XID="]');
-			const s = { wrap: header.parentElement, xid: profile ? profile.href.match(/XID=(\d+)/)?.[1] : null };
-			safe("tick-cp", () => renderCheckpoint(s));
-			safe("tick-icon", () => renderStatusIcon(s, onCompleted));
+		const decisions = new Map(Analysis.result.panels.map(p => [p.ocId, p]));
+		for (const panel of qa(document, "div[data-oc-id]")) {
+			const decision = decisions.get(panel.getAttribute("data-oc-id"));
+			qa(panel, sel("slotHeader")).forEach((header, i) => {
+				const profile = q(header.parentElement, 'a[href*="profiles.php?XID="]');
+				const s = { wrap: header.parentElement, xid: profile ? profile.href.match(/XID=(\d+)/)?.[1] : null };
+				safe("tick-cp", () => renderCheckpoint(s, decision?.slots[i]?.failed));
+				safe("tick-icon", () => renderStatusIcon(s, onCompleted));
+			});
 		}
 	}
 
