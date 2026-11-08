@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.4
+// @version      4.2.5
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -36,6 +36,7 @@
 
     const STORAGE_SLOT = 'torn-attack-slot';
     const STORAGE_TYPE = 'torn-attack-type';
+    const STORAGE_BAR_HEIGHT = 'rr-attack-bar-height';      // last full bar + header height in px, so the verifying bar can match it
     const LEGACY_KEYS = ['torn-attack-api-key', 'torn-attack-jwt'];  // old page-readable key/token copies, deleted
     const SECURE_STORAGE_KEY = 'torn-attack-api-key-v2';
     const SESSION_STORAGE_KEY = 'rr-attack-session-v1';
@@ -56,7 +57,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.4';                                // keep in step with @version above
+    const VERSION = '4.2.5';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -346,7 +347,7 @@
             [data-txm-warn="avoid"]::after { color: #d63b3b; }
             .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('topSection')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('delimiter')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('bottomSection')} { display: none !important; }
             .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} { margin: 0 !important; padding: 0 !important; border: 0 !important; min-height: 0 !important; }
-            .txm-fa-bar { display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 8px 12px; background: #1f1f1f; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; font-size: 12px; color: #ddd; }
+            .txm-fa-bar { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 8px 12px; background: #1f1f1f; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; font-size: 12px; color: #ddd; }
             .txm-fa-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
             .txm-fa-brand { color: #029e7a; font-weight: 700; letter-spacing: 1.5px; white-space: nowrap; }
             .txm-fa-brand small { color: #8a8a8a; font-weight: 600; letter-spacing: 1px; margin-left: 4px; }
@@ -369,7 +370,10 @@
             .txm-fa-bar .txm-fastattack { margin: 0; }
             .txm-fa-bar .txm-fastattack label { display: inline-flex; align-items: center; gap: 4px; color: #8a8a8a; }
             [data-txm-block] { pointer-events: none !important; opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
-            .txm-fa-info { border-top: 1px solid #333; padding-top: 6px; font-size: 11px; }
+            .txm-fa-info { border-top: 1px solid #333; padding-top: 6px; font-size: 11px; min-height: 20px; }
+            .txm-fa-info[data-empty="1"] { visibility: hidden; }   /* keeps its space: the page never jumps as rows come and go */
+            .txm-fa-bar > .txm-fa-row:first-child { min-height: 24px; }
+            .txm-fa-bar[data-txm-mode="auth"] .txm-fa-gear { margin-left: auto; }
             .txm-fa-advice, .txm-fa-limits, .txm-fa-warn { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
             .txm-fa-limits, .txm-fa-warn { margin-left: auto; }
             .txm-fa-warn { color: #e74c3c; font-weight: 700; letter-spacing: .3px; }
@@ -649,13 +653,13 @@
     }
 
     // The advice, limits and warn sections share one bar line - the wrapper
-    // row shows while any of them has content.
+    // row is drawn while any of them has content, and keeps its space while empty.
     function syncInfoRow() {
         const bar = q(document, '.txm-fa-bar');
-        if (!bar) return;
+        if (!bar || bar.getAttribute('data-txm-mode') === 'auth') return;   // its info row is the always-shown status
         const any = qa(bar, '.txm-fa-advice, .txm-fa-limits, .txm-fa-warn, .txm-fa-hold')
             .some(el => !el.hasAttribute('hidden'));
-        setShown(q(bar, '.txm-fa-info'), any);
+        setAttr(q(bar, '.txm-fa-info'), 'data-empty', any ? '0' : '1');
     }
 
     function renderAdvice() {
@@ -778,7 +782,7 @@
                 </span>
             </div>
 
-            <div class="txm-fa-row txm-fa-info" hidden>
+            <div class="txm-fa-row txm-fa-info" data-empty="1">
                 <div class="txm-fa-advice" hidden></div>
                 <div class="txm-fa-limits" hidden></div>
                 <div class="txm-fa-warn" hidden></div>
@@ -823,9 +827,9 @@
         const bar = makeBar('auth', `
             <div class="txm-fa-row">
                 <span class="txm-fa-brand">RR ATTACK ADVISOR <small>v${VERSION}</small></span>
-                <span class="txm-fa-auth-state"></span>
                 <button type="button" class="txm-fa-gear" title="Settings">&#9881;</button>
             </div>
+            <div class="txm-fa-row txm-fa-info"><span class="txm-fa-auth-state"></span></div>
         `, head, mount);
         setText(q(bar, '.txm-fa-auth-state'), authStatusText());
         return bar;
@@ -850,6 +854,23 @@
 
         if (Session.pass()) updateBar(bar);
         else setText(q(bar, '.txm-fa-auth-state'), authStatusText());
+        holdBarSpace(bar, head);
+    }
+
+    // The full bar replaces Torn's header, so it is taller than the "Verifying access…" bar that sits above
+    // that header. The full bar's last height (with any header still showing) is remembered, and the
+    // verifying bar is padded to match, so the page does not jump down once access is confirmed.
+    // shortcut: the remembered height is the last attack page's, so a first-ever visit or a wrap change can still move it slightly.
+    function holdBarSpace(bar, head) {
+        const headH = head && head.isConnected ? head.offsetHeight : 0;
+        if (bar.getAttribute('data-txm-mode') === 'full') {
+            const total = String(bar.offsetHeight + headH);
+            if (total !== '0' && storeGet(STORAGE_BAR_HEIGHT) !== total) storeSet(STORAGE_BAR_HEIGHT, total);
+            return;
+        }
+        const want = Math.max(0, Number(storeGet(STORAGE_BAR_HEIGHT)) - headH);
+        const css = want ? want + 'px' : '';
+        if (bar.style.minHeight !== css) bar.style.minHeight = css;
     }
 
     function updateBar(bar) {
