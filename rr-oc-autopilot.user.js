@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR OC Autopilot
 // @namespace    txm.private.oc-autopilot
-// @version      2.2.4
+// @version      2.3.0
 // @author       TXM [1712536]
 // @description  Private OC planning assistant
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-oc-autopilot.user.js
@@ -25,7 +25,7 @@
 (function() {
 	"use strict";
 
-	const VERSION = "2.2.4";
+	const VERSION = "2.3.0";
 	const AUTH_API = "https://rr-script-auth.deathapostle1.workers.dev";
 	const ZZCRAFT_API = "https://api.torn.zzcraft.net";
 	const ZZCRAFT_USERAGENT = `rr-oc-userscript/${VERSION}`; // Per-user ZZCraft logging
@@ -38,7 +38,9 @@
 	const GATE_RETRY_MS = 60 * 1000; // server's failure cooldown and Retry-After
 	const API_KEY_STORAGE = "rr_oc_api_key_v2";
 	const LEGACY_API_KEY_STORAGE = "rr_oc_api_key"; // pre-2.1 copy the page could read; deleted on load
-	const FACTION_COLOURS = { accent: "#029e7a", dark: "#1f1f1f" };
+	// Crest look: the faction skull (64px webp, embedded so nothing else is loaded) and the Crest font, with a system fallback.
+	const SKULL = "data:image/webp;base64,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";
+	const CREST_FONT_URL = "https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&display=swap";
 	const MEMBERS_REFRESH_MS = 60 * 1000; // server refreshes member status every 60 s
 	const CRIMES_REFRESH_MS = 30 * 1000; // server refreshes crime data every 30 s
 	const RETRY_MS = 30 * 1000; // retry window after a failed fetch; a longer Retry-After wins
@@ -437,6 +439,7 @@
 		qa(document, ".rr-meta, .rr-cp, .rr-info, .rr-stat, .rr-lock").forEach((n) => n.remove());
 		qa(document, ".rr-role").forEach((h) => h.classList.remove("rr-role", "rr-item-missing"));
 		qa(document, FILL_SELECTOR).forEach((w) => w.classList.remove(...FILL));
+		qa(document, ".rr-slot").forEach((w) => w.classList.remove("rr-slot"));
 		for (const p of qa(document, "div[data-oc-id]")) {
 			p.removeAttribute("aria-busy");
 			delete p.dataset.rrFp;
@@ -453,30 +456,50 @@
 		// Keep layout nodes while their replacement decision is in flight. Do not
 		// keep stale eligibility, occupant status or probability as a current result.
 		if (panel.getAttribute("aria-busy") !== "true") panel.setAttribute("aria-busy", "true");
-		qa(panel, ".rr-stat, .rr-lock").forEach(n => n.remove());
+		qa(panel, ".rr-stat, .rr-lock, .rr-item").forEach(n => n.remove());
 		qa(panel, ".rr-role.rr-item-missing").forEach(h => h.classList.remove("rr-item-missing"));
 		qa(panel, FILL_SELECTOR).forEach(w => {
 			for (const fill of FILL) if (w.classList.contains(fill) !== (fill === "rr-fill-grey")) w.classList.toggle(fill, fill === "rr-fill-grey");
+			const foot = w.querySelector(".rr-meta");
+			if (foot) renderFill(foot, "pending");
 		});
 		if (!keepRequirements) qa(panel, ".rr-meta .rr-v").forEach(n => { if (n.textContent !== "…") n.textContent = "…"; });
 		const pill = panel.querySelector(".rr-success");
-		if (pill) {
-			const text = Analysis.error ? "Success: unavailable" : "Success: …";
-			if (pill.textContent !== text) pill.textContent = text;
-			pill.style.setProperty("--rr-c", "#868e96");
-		}
+		if (pill) setPill(pill, "none", "Success", Analysis.error ? "unavailable" : "…");
 		delete panel.dataset.rrFp;
 	}
 
-	const TIMED_STATES = ["Hospital", "Jail", "Federal"]; // states with a release time
-	const STATUS_ICON = {
-		Okay: `<svg width="14" height="14" viewBox="0 0 24 24"><circle cx="12" cy="12" r="6" fill="#2f9e44"/></svg>`,
-		Hospital: `<svg width="14" height="14" viewBox="0 0 24 24" fill="#e03131"><path d="M9 2h6v7h7v6h-7v7H9v-7H2V9h7z"/></svg>`,
-		Jail: `<svg width="14" height="14" viewBox="0 0 24 24" fill="#c98a52"><rect x="3.5" y="2" width="3" height="20" rx="1"/><rect x="10.5" y="2" width="3" height="20" rx="1"/><rect x="17.5" y="2" width="3" height="20" rx="1"/></svg>`,
-		Traveling: `<svg width="14" height="14" viewBox="0 0 24 24" fill="#74c0fc"><path d="M22 12c0-.7-.6-1.3-1.3-1.3L14 10l-4-7H8l2 7-4 .3L4 8H2.5l1 4-1 4H4l2-2.3 4 .3-2 7h2l4-7 6.7-.7c.7 0 1.3-.6 1.3-1.3z"/></svg>`,
+	// Crest icons: 24px stroke paths, drawn in the text colour.
+	const ICON_PATHS = {
+		settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+		close: '<path d="M6 6l12 12M18 6L6 18"/>',
+		chevron: '<path d="M6 9l6 6 6-6"/>',
+		check: '<path d="M5 12l5 5 9-10"/>',
+		lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+		sort: '<path d="M7 4v16M3 16l4 4 4-4M17 20V4M13 8l4-4 4 4"/>',
+		key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2"/>',
+		info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
+		warn: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/>',
+		hosp: '<path d="M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z"/>',
+		jail: '<path d="M5 3v18M10 3v18M15 3v18M20 3v18M3 8h19M3 16h19"/>',
+		plane: '<path d="M2 15l20-7-3 9-6-2-2 5-2-6z"/>',
+		globe: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18"/>',
 	};
-	STATUS_ICON.Federal = STATUS_ICON.Jail;
-	STATUS_ICON.Abroad = STATUS_ICON.Traveling;
+	const icon = (name, size = 14, cls = "", attrs = "") =>
+		`<svg class="rr-ico${cls ? " " + cls : ""}"${attrs} width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICON_PATHS[name]}</svg>`;
+
+	const TIMED_STATES = ["Hospital", "Jail", "Federal"]; // states with a release time
+	// Used on the slot's status chip and in Torn's slot tooltip; data-st picks the colour.
+	const statusIcon = (state, name) => icon(name, 12, "rr-st-ico", ` data-st="${state}"`);
+	const STATUS_ICON = {
+		Okay: statusIcon("Okay", "check"),            // a tick in a rounded box, like every other status
+		Hospital: statusIcon("Hospital", "hosp"),
+		Jail: statusIcon("Jail", "jail"),
+		Federal: statusIcon("Federal", "jail"),
+		Traveling: statusIcon("Traveling", "plane"),
+		Abroad: statusIcon("Abroad", "globe"),
+	};
+	const STATUS_WORD = { Okay: "Available", Hospital: "In hospital", Jail: "In jail", Federal: "In federal jail", Traveling: "Traveling", Abroad: "Abroad" };
 
 	// Member status and crime data share one poll: once per interval, and after a failure no sooner
 	// than RETRY_MS (or the server's Retry-After). A 401/403 for the current session ends it.
@@ -648,82 +671,238 @@
 		},
 	};
 
+	// Crest. Colours are tokens on <body>: light by default, dark when Torn's body has dark-mode. Teal #029E7A is
+	// primary (actions, go states, the toolbar's top strip); gold #C9A95C is the brand accent (outlines, small labels).
 	const STYLE = `
-		.rr-meta { box-sizing: border-box; display: flex; gap: 4px; width: calc(100% - 10px); margin: 5px auto; position: relative; z-index: 1; }
-		.rr-meta .rr-cell { flex: 1; min-width: 0; padding: 3px 4px; border-radius: 4px; text-align: center; background:${FACTION_COLOURS.dark}; border: 1px solid rgba(2, 158, 122, .45); }
-		.rr-meta .rr-l { font-size: 10px; letter-spacing: .5px; color:${FACTION_COLOURS.accent}; opacity: .95; }
-		.rr-meta .rr-v { font-size: 11px; font-weight: 700; color: #fff; }
-		.rr-cp { box-sizing: border-box; width: calc(100% - 10px); height: 4px; margin: 0 auto 5px; border-radius: 2px; overflow: hidden; background: var(--oc-clock-bg, rgba(255, 255, 255, .12)); }
-		.rr-cp > i { display: block; height: 100%; background:${FACTION_COLOURS.accent}; }
-		.rr-cp.rr-amber > i { background: #db7b2b; }
-		.rr-cp.rr-fail > i { background: #cc3232; }
-		.rr-role.rr-role { box-sizing: border-box; width: 100% !important; margin: 0 !important; border: none !important; border-radius: 6px 6px 0 0 !important; background:${FACTION_COLOURS.dark} !important; padding: 0 6px 0 20px !important; }
-		body.rr-oc-authorized #faction-crimes-root [class*="slotIcon___"] { display: none !important; }
-		body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"] [class*="title___"] { color: #fff !important; }
-		body.rr-oc-authorized #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] { color: #cc3232 !important; }
-		.rr-info { display: flex; align-items: center; flex: 0 0 auto; margin: 0 6px; min-width: 0; }
-		.rr-success { position: relative; display: inline-flex; align-items: center; gap: 6px; padding: 2px 10px; border-radius: 10px; font-size: 12px; font-weight: 700; line-height: 1.5; white-space: nowrap; color: #fff !important; background:${FACTION_COLOURS.dark}; border: 1px solid var(--rr-c, #444); box-shadow: 0 0 7px -1px var(--rr-c, transparent); cursor: default; }
-		.rr-pip { width: 8px; height: 8px; border-radius: 50%; flex: none; box-shadow: 0 0 0 1px rgba(255, 255, 255, .28); }
-		.rr-stat { position: absolute; top: 3px; left: 4px; width: 14px; height: 14px; z-index: 5; pointer-events: none; display: flex; }
-		.rr-stat svg { display: block; }
-		.rr-fill-green, .rr-fill-amber, .rr-fill-red, .rr-fill-grey { position: relative; border-radius: 6px; background: #2b2b2b !important; }
-		.rr-fill-green { box-shadow: 0 0 0 2px #029e7a, 0 0 9px rgba(2, 158, 122, .5) !important; }
-		.rr-fill-amber { box-shadow: 0 0 0 2px #db7b2b, 0 0 8px rgba(219, 123, 43, .45) !important; }
-		.rr-fill-red { box-shadow: 0 0 0 2px #cc3232, 0 0 8px rgba(204, 50, 50, .45) !important; }
-		.rr-fill-grey { box-shadow: 0 0 0 2px rgba(150, 150, 150, .6), 0 0 8px rgba(150, 150, 150, .3) !important; }
-		body.rr-oc-authorized #faction-crimes-root [class*="slotBody___"] { background: transparent !important; border-color: transparent !important; }
-		.tt-oc-highlight .rr-fill-green, .tt-oc-highlight .rr-fill-amber, .tt-oc-highlight .rr-fill-red, .tt-oc-highlight .rr-fill-grey { outline: 2px solid rgba(0, 0, 0, .6) !important; outline-offset: 2px; }
-		.rr-lock { position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 40; display: flex; align-items: flex-end; justify-content: center; cursor: not-allowed; padding: 5px; }
-		.rr-lock span { background: rgba(31, 31, 31, .94); border: 1px solid rgba(150, 150, 150, .5); color: #cfcfcf; font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 8px; line-height: 1.4; text-align: center; }
-		.rr-toolbar { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; padding: 8px 12px; background:${FACTION_COLOURS.dark}; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; }
-		.rr-brand { color:${FACTION_COLOURS.accent}; font-weight: 700; font-size: 12px; letter-spacing: 1.5px; }
-		.rr-brand small { color: #8a8a8a; font-weight: 600; letter-spacing: 1px; }
-		.rr-count { font-size: 11px; color: #8a8a8a; white-space: nowrap; }
-		.rr-auth-state { margin-left: auto; color: #8a8a8a; font-size: 11px; }
-		.rr-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-		.rr-toolbar select { background: #2a2a2a; color: #ddd; border: 1px solid #444; border-radius: 4px; padding: 3px 6px; font-size: 12px; }
-		.rr-api { background: transparent; border:1px solid ${FACTION_COLOURS.accent}; color:${FACTION_COLOURS.accent}; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-		.rr-api:hover { background:${FACTION_COLOURS.accent}; color: #fff; }
-		.rr-api:focus-visible { background:${FACTION_COLOURS.accent}; color: #fff; }
-		.rr-api:disabled { opacity: .5; cursor: default; }
-		.rr-gear { background: none; border: none; color: #8a8a8a; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
-		.rr-gear:hover { color:${FACTION_COLOURS.accent}; }
-		.rr-set-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999999; background: rgba(0, 0, 0, .8); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; justify-content: center; align-items: center; }
-		.rr-set-modal { display: flex; flex-direction: column; width: min(520px, 94vw); max-height: min(86vh, 700px); overflow: hidden; background: linear-gradient(180deg, #23252b, #1b1d22); border: 1px solid rgba(2, 158, 122, .5); border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); color: #d7d9de; font-size: 12px; }
-		.rr-set-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; background: linear-gradient(180deg, #2c2f37, #23252b); border-bottom: 1px solid #34373f; }
-		.rr-set-head b { color:${FACTION_COLOURS.accent}; letter-spacing: 1px; }
-		.rr-set-close { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #8a8a8a; font-size: 22px; line-height: 1; cursor: pointer; }
-		.rr-set-close:hover { color: #fff; }
-		.rr-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
-		.rr-set-section { background: #1a1a1a; border: 1px solid #34373f; border-radius: 6px; padding: 12px; }
-		.rr-set-section + .rr-set-section { margin-top: 12px; }
-		.rr-set-note { color: #8a8d96; font-size: 11px; line-height: 1.45; margin-top: 6px; }
-		.rr-set-title { color: #8a8d96; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 10px; }
-		.rr-set-input { width: 100%; box-sizing: border-box; background: #15161a; color: #d7d9de; border: 1px solid #34373f; border-radius: 5px; padding: 6px 8px; font: inherit; text-align: center; letter-spacing: 2px; margin-bottom: 10px; }
-		.rr-set-input:focus { border-color:${FACTION_COLOURS.accent}; outline: none; }
-		.rr-set-input[data-bad="1"] { border-color: #e74c3c; }
-		.rr-set-status { text-align: center; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; font-size: 11px; margin-bottom: 10px; }
-		.rr-set-status[data-state="ok"] { color: #2ecc71; }
-		.rr-set-status[data-state="bad"] { color: #e74c3c; }
-		.rr-set-status[data-state="wait"] { color: #e0a80d; }
-		.rr-set-actions { display: flex; gap: 8px; }
-		.rr-set-actions .rr-api { flex: 1; }
-		@media (max-width: 560px) {
-			.rr-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto; }
-			.rr-set-modal { margin: auto; max-height: 92vh; }
+		body {
+			--rr-font: 'Bricolage Grotesque', system-ui, -apple-system, 'Segoe UI', sans-serif;
+			--rr-primary: #029E7A; --rr-accent: #C9A95C;
+			--rr-surface: #ffffff; --rr-surface-2: #f6f4ef; --rr-sunken: #eeebe4; --rr-line: #dcd8ce;
+			--rr-text: #1c1d1f; --rr-muted: #5e5b54; --rr-primary-fg: #026e56; --rr-on-primary: #04211a; --rr-accent-fg: #7f6427;
+			--rr-ok: #11704f; --rr-close: #a14a07; --rr-below: #b42318; --rr-none: #63666c;
+			--rr-shadow: 0 12px 32px rgba(20, 20, 20, .16); --rr-scheme: light;
 		}
-		.rr-legend { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; font-size: 11px; color: #b9c1bd; }
-		.rr-legend span { display: inline-flex; align-items: center; gap: 4px; }
-		.rr-legend i { width: 10px; height: 10px; border-radius: 2px; display: inline-block; }
-		body:not(.dark-mode) .rr-fill-green, body:not(.dark-mode) .rr-fill-amber, body:not(.dark-mode) .rr-fill-red, body:not(.dark-mode) .rr-fill-grey { background: #e2e4e6 !important; }
-		body:not(.dark-mode) .rr-role.rr-role { background: #d4d7da !important; }
-		body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"] [class*="title___"] { color: #2a2a2a !important; }
-		body.rr-oc-authorized:not(.dark-mode) #faction-crimes-root [class*="slotHeader___"].rr-item-missing [class*="title___"] { color: #cc3232 !important; }
-		body:not(.dark-mode) .rr-meta .rr-cell { background: #eef0f1; }
-		body:not(.dark-mode) .rr-meta .rr-v { color: #222; }
-		body:not(.dark-mode) .rr-success { background: #eef0f1; color: #222 !important; }
-		body:not(.dark-mode) .rr-cp { background: rgba(0, 0, 0, .12); }
-		body:not(.dark-mode) .rr-legend i { box-shadow: 0 0 0 1px rgba(0, 0, 0, .25); }
+		body.dark-mode {
+			--rr-surface: #1b1c1e; --rr-surface-2: #232427; --rr-sunken: #141516; --rr-line: #33363a;
+			--rr-text: #eceae4; --rr-muted: #a8a59d; --rr-primary-fg: #2fc29d; --rr-on-primary: #04211a; --rr-accent-fg: #d4b56c;
+			--rr-ok: #4cc38a; --rr-close: #f0913e; --rr-below: #f06a5f; --rr-none: #9a9ca1;
+			--rr-shadow: 0 12px 32px rgba(0, 0, 0, .5); --rr-scheme: dark;
+		}
+
+		/* Base for the toolbar and the settings panel; Torn's page CSS still reaches them. */
+		.rr-toolbar, .rr-set { box-sizing: border-box; font-family: var(--rr-font); font-size: 12px; font-weight: 400; line-height: 1.35; color: var(--rr-text); text-align: left; letter-spacing: normal; text-transform: none; -webkit-font-smoothing: antialiased; color-scheme: var(--rr-scheme); }
+		.rr-toolbar *, .rr-toolbar *::before, .rr-toolbar *::after, .rr-set *, .rr-set *::before, .rr-set *::after,
+		.rr-meta *, .rr-meta *::before, .rr-meta *::after, .rr-info * { box-sizing: border-box; }
+		.rr-toolbar button, .rr-toolbar input, .rr-set button, .rr-set input { font: inherit; color: inherit; margin: 0; letter-spacing: inherit; text-transform: none; }
+		.rr-toolbar button, .rr-set button { cursor: pointer; }
+		.rr-toolbar :where(p, ul, li, label), .rr-set :where(p, h2, h3, h4, dl, dt, dd, label, details, summary) { margin: 0; padding: 0; font-family: inherit; letter-spacing: normal; text-transform: none; }
+		.rr-toolbar ul { list-style: none; }
+		.rr-toolbar [hidden], .rr-set [hidden], .rr-meta [hidden] { display: none !important; }
+		.rr-toolbar :focus-visible, .rr-set :focus-visible { outline: 2px solid var(--rr-accent); outline-offset: 2px; }
+		.rr-vh { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+		.rr-ico { display: block; flex: none; pointer-events: none; }
+		.rr-skull { display: block; flex: none; max-width: none; }
+		.rr-st-ico { color: var(--rr-close); }
+		.rr-st-ico[data-st="Okay"] { color: var(--rr-ok); }
+
+		/* Toolbar. It is its own size container: one row wide, the legend folds to 2x2 under 900px, drops to its own line
+		   under 760px, and the phone layout (three rows, 44px targets) starts at 640px. Min-heights match the full bar at
+		   each width, so the gated bar never makes the page jump. */
+		.rr-toolbar { container-type: inline-size; container-name: rroc; position: relative; z-index: 50; margin: 8px 0 12px; }
+		.rr-bar { display: flex; flex-wrap: wrap; align-items: center; align-content: center; gap: 8px 12px; min-height: 54px; margin: 0; padding: 8px 12px; background: var(--rr-surface); color: var(--rr-text); border: 1px solid var(--rr-line); border-radius: 6px; box-shadow: inset 0 2px 0 #029E7A; }
+		.rr-brand { display: flex; align-items: center; gap: 8px; flex: none; }
+		.rr-brand .rr-skull { width: 24px; height: 24px; }
+		.rr-titles { display: flex; flex-direction: column; }
+		.rr-kicker { font-size: 10px; font-weight: 600; line-height: 12px; color: var(--rr-accent-fg); white-space: nowrap; }
+		.rr-name { font-size: 14px; font-weight: 700; line-height: 18px; color: var(--rr-text); white-space: nowrap; }
+		.rr-cell { align-self: stretch; padding-left: 12px; border-left: 1px solid var(--rr-line); }
+		.rr-count { display: flex; flex-direction: column; justify-content: center; flex: none; min-width: 0; }
+		.rr-main { font-size: 12px; line-height: 16px; white-space: nowrap; }
+		.rr-main.rr-quiet { color: var(--rr-muted); white-space: normal; }
+		.rr-main.rr-warn { color: var(--rr-below); font-weight: 600; white-space: normal; }
+		.rr-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+		.rr-num.rr-go { color: var(--rr-primary-fg); }
+		.rr-sub { font-size: 11px; line-height: 14px; color: var(--rr-muted); white-space: nowrap; font-variant-numeric: tabular-nums; }
+		.rr-legend { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; flex: none; margin: 0; list-style: none; }
+		.rr-lkey { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; line-height: 1.3; color: var(--rr-fill); white-space: nowrap; }
+		.rr-lkey[data-fill="ok"], .rr-fill-green { --rr-fill: var(--rr-ok); }
+		.rr-lkey[data-fill="close"], .rr-fill-amber { --rr-fill: var(--rr-close); }
+		.rr-lkey[data-fill="below"], .rr-fill-red { --rr-fill: var(--rr-below); }
+		.rr-lkey[data-fill="none"], .rr-fill-grey { --rr-fill: var(--rr-none); }
+		/* Markers are small rounded squares, the same shape as the ringed slots they stand for. */
+		.rr-mark { display: block; flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--rr-fill); }
+		.rr-lkey[data-fill="none"] .rr-mark, .rr-fill-grey .rr-mark { background: transparent; box-shadow: inset 0 0 0 1.5px var(--rr-fill); }
+		.rr-tools { display: flex; align-items: center; gap: 8px; flex: none; margin-left: auto; }
+		.rr-sort { position: relative; }
+		.rr-trigger { position: relative; display: inline-flex; align-items: center; gap: 6px; min-height: 36px; margin: 0; padding: 4px 8px; border: 1px solid var(--rr-line); border-radius: 4px; background: var(--rr-surface-2); color: var(--rr-text); text-align: left; }
+		.rr-trigger:hover, .rr-trigger[aria-expanded="true"] { border-color: var(--rr-accent); }
+		.rr-trigger[aria-expanded="true"] .rr-chev { transform: rotate(180deg); }
+		.rr-ticon, .rr-chev { color: var(--rr-muted); }
+		.rr-ttext { display: flex; flex-direction: column; }
+		.rr-tlabel { font-size: 10px; font-weight: 600; line-height: 12px; color: var(--rr-muted); white-space: nowrap; }
+		.rr-tvalue { font-size: 12px; font-weight: 700; line-height: 14px; white-space: nowrap; }
+		.rr-list { position: absolute; top: calc(100% + 4px); right: 0; z-index: 50; min-width: 220px; max-width: calc(100vw - 24px); padding: 4px; background: var(--rr-surface); border: 1px solid var(--rr-line); border-radius: 6px; box-shadow: var(--rr-shadow); }
+		.rr-list-head { padding: 4px 8px 6px; font-size: 10px; font-weight: 600; line-height: 12px; color: var(--rr-muted); }
+		.rr-options { display: flex; flex-direction: column; gap: 2px; }
+		.rr-option { position: relative; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 32px; padding: 6px 8px; border-radius: 4px; font-size: 12px; font-weight: 600; line-height: 16px; color: var(--rr-text); white-space: nowrap; cursor: pointer; }
+		.rr-option:hover { background: var(--rr-surface-2); }
+		.rr-option:focus-within { outline: 2px solid var(--rr-accent); outline-offset: -2px; }
+		.rr-tick { color: var(--rr-primary-fg); visibility: hidden; }
+		.rr-option input:checked ~ .rr-tick { visibility: visible; }
+		.rr-gear { display: inline-flex; align-items: center; justify-content: center; flex: none; width: 36px; height: 36px; margin: 0; padding: 0; border: 1px solid var(--rr-accent); border-radius: 4px; background: transparent; color: var(--rr-accent-fg); }
+		.rr-gear:hover { background: var(--rr-surface-2); }
+		.rr-gate { display: flex; align-items: center; gap: 8px; flex: 1 1 auto; min-width: 0; font-size: 12px; font-weight: 600; line-height: 16px; color: var(--rr-text); }
+		.rr-gate-icon { color: var(--rr-muted); }
+		.rr-gate--nokey .rr-gate-icon { color: var(--rr-accent-fg); }
+		.rr-gate--denied .rr-gate, .rr-gate--denied .rr-gate-icon { color: var(--rr-below); }
+		.rr-gate--unavailable .rr-gate-icon { color: var(--rr-close); }
+		@container rroc (max-width: 900px) {
+			.rr-legend { display: grid; grid-template-columns: repeat(2, auto); align-content: center; justify-content: start; gap: 2px 12px; }
+		}
+		@container rroc (max-width: 760px) {
+			.rr-bar { min-height: 86px; }
+			.rr-bar.rr-short { min-height: 54px; }
+			.rr-legend { order: 2; display: flex; flex-basis: 100%; min-height: 24px; padding: 8px 0 0; border-left: 0; border-top: 1px solid var(--rr-line); }
+			.rr-tools { order: 1; }
+		}
+		@container rroc (max-width: 640px) {
+			.rr-bar { min-height: 132px; }
+			.rr-bar.rr-short { min-height: 86px; }
+			.rr-legend, .rr-tools { order: 0; }
+			.rr-gate { order: 3; flex-basis: 100%; padding-left: 0; border-left: 0; }
+			.rr-trigger { min-height: 44px; }
+			.rr-tlabel { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); border: 0; }
+			.rr-gear { width: 44px; height: 44px; }
+			.rr-option { min-height: 44px; }
+		}
+
+		/* Slots: the scenario colouring. Each analysed slot is ringed in its fit colour and its role header is tinted the same
+		   hue, so a crime reads at a glance (2.2.4's rings, in Crest form). The footer holds the fit word, member status, Min
+		   and Weight as two ruled cells, planning progress, and the lock and missing-item lines. Slots are 95-150px wide: rows
+		   wrap between word groups, never inside a word. Ring colours are the server's own fit colours. */
+		body.rr-oc-authorized #faction-crimes-root [class*="slotIcon___"] { display: none !important; }
+		.rr-fill-green { --rr-ring: #029E7A; }
+		.rr-fill-amber { --rr-ring: #DB7B2B; }
+		.rr-fill-red { --rr-ring: #CC3232; }
+		.rr-fill-grey { --rr-ring: #8A8D93; }
+		.rr-slot.rr-fill-green, .rr-slot.rr-fill-amber, .rr-slot.rr-fill-red, .rr-slot.rr-fill-grey { border-radius: 6px; box-shadow: 0 0 0 2px var(--rr-ring) !important; }
+		body.dark-mode .rr-slot.rr-fill-green, body.dark-mode .rr-slot.rr-fill-amber, body.dark-mode .rr-slot.rr-fill-red, body.dark-mode .rr-slot.rr-fill-grey { box-shadow: 0 0 0 2px var(--rr-ring), 0 0 10px -3px var(--rr-ring) !important; }
+		.rr-fill-green > .rr-role, .rr-fill-amber > .rr-role, .rr-fill-red > .rr-role, .rr-fill-grey > .rr-role { background: var(--rr-surface-2) !important; background: color-mix(in srgb, var(--rr-ring) 24%, var(--rr-surface)) !important; box-shadow: none !important; border-radius: 6px 6px 0 0 !important; }
+		body.dark-mode .rr-fill-green > .rr-role, body.dark-mode .rr-fill-amber > .rr-role, body.dark-mode .rr-fill-red > .rr-role, body.dark-mode .rr-fill-grey > .rr-role { background: color-mix(in srgb, var(--rr-ring) 32%, var(--rr-surface)) !important; }
+		/* Role names and the member's CPR in the Crest font, not Torn's capitals. */
+		body.rr-oc-authorized #faction-crimes-root .rr-role [class*="title___"] { color: var(--rr-text) !important; font-family: var(--rr-font) !important; font-size: 12px !important; font-weight: 700 !important; letter-spacing: normal !important; text-transform: none !important; }
+		body.rr-oc-authorized #faction-crimes-root .rr-role [class*="successChance___"] { font-family: var(--rr-font) !important; font-weight: 800 !important; font-variant-numeric: tabular-nums; }
+		body.rr-oc-authorized #faction-crimes-root .rr-role.rr-item-missing [class*="title___"] { color: var(--rr-below) !important; }
+		/* One Crest surface inside the ring: Torn's beige member area takes the panel colour, and its inner box takes the
+		   same 4px corners as the Min and Weight cells. */
+		.rr-slot > [class*="slotBody___"] { background: var(--rr-surface) !important; border-bottom-left-radius: 0 !important; border-bottom-right-radius: 0 !important; }
+		.rr-slot [class*="slotMenu___"] { background: var(--rr-surface) !important; border-color: var(--rr-line) !important; border-radius: 4px !important; }
+		.rr-meta { box-sizing: border-box; display: flex; flex: 1 0 auto; flex-direction: column; gap: 4px; min-width: 0; margin: 0; padding: 4px 6px 6px; border: 0; border-top: 1px solid var(--rr-line); border-radius: 0 0 6px 6px; background: var(--rr-surface-2); color: var(--rr-text); font-family: var(--rr-font); font-size: 11px; font-weight: 400; font-style: normal; line-height: 1.3; text-align: left; text-transform: none; text-shadow: none; letter-spacing: normal; white-space: normal; overflow-wrap: normal; word-break: normal; cursor: default; }
+		.rr-top { order: 1; display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 4px; min-height: 18px; }
+		.rr-kv { order: 2; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); border: 1px solid var(--rr-line); border-radius: 4px; overflow: hidden; background: var(--rr-surface); }
+		.rr-cp { order: 3; display: flex; align-items: center; gap: 6px; }
+		.rr-lock { order: 4; }
+		.rr-item { order: 5; }
+		.rr-fillword { display: inline-flex; align-items: center; gap: 6px; white-space: nowrap; }
+		.rr-word { font-size: 11px; font-weight: 700; line-height: 1.3; color: var(--rr-fill); white-space: nowrap; }
+		/* Member status: every state is the same small rounded box; problems are orange, "Available" a quiet teal. */
+		.rr-stat { position: relative; display: inline-flex; flex: none; align-items: center; justify-content: center; width: 20px; height: 18px; margin-left: auto; padding: 0; border-radius: 3px; background: var(--rr-sunken); background: color-mix(in srgb, var(--rr-close) 18%, transparent); color: var(--rr-close); }
+		.rr-stat[data-st="Okay"] { background: var(--rr-sunken); background: color-mix(in srgb, var(--rr-ok) 14%, transparent); color: var(--rr-ok); }
+		.rr-kvi { display: flex; flex-direction: column; align-items: center; min-width: 0; padding: 2px 4px 3px; white-space: nowrap; }
+		.rr-kvi + .rr-kvi { border-left: 1px solid var(--rr-line); }
+		.rr-l { font-size: 9.5px; font-weight: 600; line-height: 12px; color: var(--rr-muted); }
+		.rr-v { font-size: 12px; font-weight: 700; line-height: 15px; color: var(--rr-text); font-variant-numeric: tabular-nums; }
+		.rr-track { flex: 1 1 auto; min-width: 0; height: 4px; border-radius: 2px; overflow: hidden; background: var(--rr-line); background: color-mix(in srgb, var(--rr-text) 12%, transparent); }
+		.rr-track > i { display: block; height: 100%; border-radius: 2px; background: var(--rr-primary); }
+		.rr-cp.rr-amber .rr-track > i { background: var(--rr-close); }
+		.rr-cp.rr-fail .rr-track > i { background: var(--rr-below); }
+		.rr-pct { flex: none; min-width: 4ch; font-size: 10px; font-weight: 600; line-height: 1.3; text-align: right; color: var(--rr-primary-fg); font-variant-numeric: tabular-nums; white-space: nowrap; }
+		.rr-cp.rr-amber .rr-pct { color: var(--rr-muted); }
+		.rr-cp.rr-fail .rr-pct { color: var(--rr-below); }
+		.rr-lock, .rr-item { display: flex; align-items: flex-start; gap: 4px; font-weight: 600; line-height: 1.3; }
+		.rr-lock .rr-ico, .rr-item .rr-ico { margin-top: 1px; }
+		.rr-lock { color: var(--rr-below); cursor: not-allowed; }
+		.rr-item { color: var(--rr-close); }
+		.rr-keep { white-space: nowrap; }
+		/* A slot you cannot join stays covered, as before, so Torn's Join button cannot be pressed. */
+		.rr-lock::before { content: ""; position: absolute; top: 0; right: 0; bottom: 0; left: 0; z-index: 40; cursor: not-allowed; }
+
+		/* After the crime title: the success pill, filled in its band colour (on Completed, the result), and a teal
+		   "Open to you" tag when the crime has a slot you can join now. */
+		.rr-info { display: inline-flex; align-items: center; gap: 6px; flex: none; min-width: 0; margin: 0 6px 0 4px; }
+		/* Torn's crime header may shrink, so its title ellipsises to make room for the pill instead of widening the page. */
+		body.rr-oc-authorized #faction-crimes-root div[data-oc-id] [class*="panel___"] { min-width: 0; }
+		.rr-success { order: 1; position: relative; box-sizing: border-box; display: inline-flex; flex: none; align-items: center; gap: 4px; margin: 0; padding: 2px 7px; border: 1px solid var(--rr-ring, var(--rr-accent)); border-radius: 3px; background: var(--rr-surface); background: color-mix(in srgb, var(--rr-ring, var(--rr-accent)) 16%, var(--rr-surface)); color: var(--rr-muted) !important; font-family: var(--rr-font); font-size: 11px; font-weight: 600; font-style: normal; line-height: 1.3; text-align: left; text-transform: none; text-shadow: none; letter-spacing: normal; white-space: nowrap; vertical-align: middle; cursor: default; }
+		.rr-success[data-band="ok"] { --rr-band: var(--rr-ok); --rr-ring: #029E7A; }
+		.rr-success[data-band="close"] { --rr-band: var(--rr-close); --rr-ring: #DB7B2B; }
+		.rr-success[data-band="below"] { --rr-band: var(--rr-below); --rr-ring: #CC3232; }
+		.rr-success[data-band="none"] { --rr-band: var(--rr-none); --rr-ring: #8A8D93; }
+		.rr-pv { color: var(--rr-band, var(--rr-none)); font-size: 12px; font-weight: 800; font-variant-numeric: tabular-nums; }
+		.rr-success .rr-ico { color: var(--rr-band, var(--rr-none)); }
+		.rr-join { order: 2; box-sizing: border-box; display: inline-flex; flex: none; align-items: center; gap: 6px; margin: 0; padding: 2px 7px; border-radius: 3px; background: #029E7A; color: #04211a !important; font-family: var(--rr-font); font-size: 11px; font-weight: 700; font-style: normal; line-height: 1.3; text-transform: none; letter-spacing: normal; white-space: nowrap; vertical-align: middle; }
+		.rr-join .rr-mark { background: currentColor; }
+		/* Phones: the pill drops the word "Success" and the tag shortens to "Open" (both kept for screen readers). */
+		@media (max-width: 480px) { .rr-pl, .rr-join-more { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; } }
+
+		/* Settings: a side panel on the right. The header stays put and the body scrolls. */
+		.rr-set-backdrop { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999990; background: rgba(0, 0, 0, .5); }
+		.rr-set-layer { position: fixed; top: 64px; bottom: 64px; right: 0; z-index: 999991; display: flex; width: min(380px, 100%); }
+		.rr-panel { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; max-height: 100%; overflow: hidden; background: var(--rr-surface); border-left: 1px solid var(--rr-line); box-shadow: var(--rr-shadow), inset 0 1px 0 rgba(201, 169, 92, .35); color: var(--rr-text); }
+		.rr-panel-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px; border-bottom: 1px solid var(--rr-line); }
+		.rr-panel-crest { display: flex; align-items: center; gap: 8px; min-width: 0; }
+		.rr-panel-crest .rr-skull { width: 32px; height: 32px; }
+		.rr-panel-titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+		.rr-panel-brand { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--rr-accent-fg); }
+		.rr-set h2.rr-panel-title { margin: 0; font-size: 15px; font-weight: 800; line-height: 1.2; color: var(--rr-text); }
+		.rr-panel-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 16px; }
+		.rr-set .rr-sec { display: grid; gap: 12px; padding: 16px 0; border-top: 1px solid var(--rr-line); }
+		.rr-set .rr-sec:first-child { border-top: 0; }
+		.rr-set h3.rr-sec-head { margin: 0; font-size: 13px; font-weight: 700; line-height: 1.3; color: var(--rr-text); }
+		.rr-group { display: grid; gap: 8px; }
+		.rr-set h4.rr-eyebrow { margin: 0; font-size: 10.5px; font-weight: 600; line-height: 1.3; letter-spacing: .02em; color: var(--rr-accent-fg); }
+		.rr-btn { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 32px; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; }
+		.rr-btn--primary { background: var(--rr-primary); color: var(--rr-on-primary) !important; }
+		.rr-btn--primary:hover { filter: brightness(1.08); }
+		.rr-btn--ghost { background: transparent; border-color: var(--rr-line); color: var(--rr-text); }
+		.rr-btn--ghost:hover { border-color: var(--rr-accent); }
+		.rr-btn--icon { flex: none; width: 32px; height: 32px; padding: 0; background: transparent; border-color: var(--rr-accent); color: var(--rr-accent-fg); }
+		.rr-btn--icon:hover { background: var(--rr-surface-2); }
+		.rr-set .rr-key { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--rr-line); border-radius: 6px; background: var(--rr-surface-2); }
+		.rr-set .rr-set-status { --rr-dot: var(--rr-none); display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--rr-text); }
+		.rr-set-status::before { content: ""; flex: none; width: 8px; height: 8px; border-radius: 999px; background: var(--rr-dot); box-shadow: 0 0 0 3px var(--rr-line); box-shadow: 0 0 0 3px color-mix(in srgb, var(--rr-dot) 22%, transparent); }
+		.rr-set-status[data-state="ok"] { --rr-dot: var(--rr-ok); }
+		.rr-set-status[data-state="bad"] { --rr-dot: var(--rr-below); }
+		.rr-set-status[data-state="wait"] { --rr-dot: var(--rr-close); }
+		.rr-set .rr-key-label { margin-top: 4px; font-size: 11px; font-weight: 600; color: var(--rr-muted); }
+		.rr-set .rr-key-input { display: block; width: 100%; min-width: 0; height: 32px; margin: 0; padding: 0 12px; border: 1px solid var(--rr-line); border-radius: 4px; background: var(--rr-surface); color: var(--rr-text); font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: none; }
+		.rr-key-input::placeholder { color: var(--rr-muted); opacity: 1; }
+		.rr-key-input:hover, .rr-key-input:focus { border-color: var(--rr-accent); }
+		.rr-set .rr-key-input[data-bad="1"] { border-color: var(--rr-below); }
+		.rr-key-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+		/* Phones zoom into inputs smaller than 16px when they take focus. */
+		@media (pointer: coarse) { .rr-set .rr-key-input { font-size: 16px; } }
+		.rr-choices { display: grid; padding: 4px; border: 1px solid var(--rr-line); border-radius: 6px; background: var(--rr-surface); }
+		.rr-set .rr-choice { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) 16px; align-items: center; gap: 8px; min-height: 40px; padding: 4px 8px; border-radius: 4px; cursor: pointer; }
+		.rr-choice:hover { background: var(--rr-surface-2); }
+		.rr-choice input { position: absolute; width: 1px; height: 1px; margin: 0; opacity: 0; pointer-events: none; }
+		.rr-choice:focus-within { outline: 2px solid var(--rr-accent); outline-offset: -2px; }
+		.rr-choice-name { font-size: 12.5px; font-weight: 700; color: var(--rr-text); }
+		.rr-choice-check { display: flex; color: var(--rr-primary-fg); visibility: hidden; }
+		.rr-choice input:checked ~ .rr-choice-check { visibility: visible; }
+		.rr-set .rr-version { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 600; color: var(--rr-muted); }
+		.rr-chip { flex: none; padding: 0 4px; border: 1px solid var(--rr-accent); border-radius: 3px; color: var(--rr-accent-fg); font-size: 10.5px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+		.rr-set .rr-keyuse { display: block; padding: 8px 0; }
+		.rr-set .rr-keyuse-sum { display: flex; align-items: center; gap: 8px; min-height: 40px; border-radius: 4px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--rr-text); }
+		.rr-keyuse-sum::-webkit-details-marker { display: none; }
+		.rr-keyuse-sum .rr-ico { color: var(--rr-muted); }
+		.rr-keyuse-sum:hover .rr-keyuse-chev { color: var(--rr-accent-fg); }
+		.rr-keyuse-chev { margin-left: auto; transition: transform .15s ease; }
+		.rr-keyuse[open] .rr-keyuse-chev { transform: rotate(180deg); }
+		.rr-set .rr-keyuse-notes { display: grid; gap: 8px; margin-top: 8px; padding: 12px; border-radius: 6px; background: var(--rr-sunken); }
+		.rr-keyuse-note { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px 12px; }
+		.rr-set .rr-keyuse-term { font-size: 12px; font-weight: 600; color: var(--rr-text); }
+		.rr-set .rr-keyuse-text { font-size: 11px; line-height: 1.45; color: var(--rr-muted); }
+		@media (prefers-reduced-motion: reduce) { .rr-toolbar *, .rr-set * { transition: none !important; } }
 	`;
 
 	// The Torn id of the member in a slot, from its profile link.
@@ -790,16 +969,40 @@
 	const finite = (v) => (typeof v === "number" || (typeof v === "string" && v.trim() !== "")) && Number.isFinite(Number(v)) ? Number(v) : null;
 	const safeColour = (v) => typeof v === "string" && /^#[0-9a-f]{3,8}$/i.test(v) ? v : "#868e96";
 
+	const FILL_KEY = { green: "ok", amber: "close", red: "below", grey: "none" }; // the server's fill -> Crest's label
+	const FILL_WORD = { ok: "Eligible", close: "Close", below: "Below", none: "No data" };
+	const BAND = { "#029e7a": "ok", "#db7b2b": "close", "#cc3232": "below" }; // the server's success colour -> Crest's band
+
+	// The footer under a slot that holds every decoration, made on first use. Its rows are ordered by CSS, so each
+	// part can be added or removed on its own.
+	function footer(wrap) {
+		let foot = wrap.querySelector(".rr-meta");
+		if (!foot) {
+			foot = el("div", "rr-meta", `<div class="rr-top"><span class="rr-fillword" hidden><span class="rr-mark" aria-hidden="true"></span><span class="rr-word"></span></span></div><div class="rr-kv"></div>`);
+			wrap.appendChild(foot);
+		}
+		if (!wrap.classList.contains("rr-slot")) wrap.classList.add("rr-slot");
+		return foot;
+	}
+
+	// key: ok | close | below | none, "pending" while a new decision is on its way, or nothing for a slot with no fill.
+	function renderFill(foot, key) {
+		const label = q(foot, ".rr-fillword");
+		if (!label || label.dataset.k === String(key)) return;
+		label.dataset.k = key;
+		const word = FILL_WORD[key] || (key === "pending" ? "…" : "");
+		label.hidden = !word;
+		q(label, ".rr-word").textContent = word;
+	}
+
 	function renderMeta(slot, decision) {
 		const w = finite(decision.weight);
 		const req = finite(decision.required);
 		const html =
-			`<div class="rr-cell"><div class="rr-l">Min</div><div class="rr-v">${req == null ? "--" : req}</div></div>` +
-			`<div class="rr-cell"><div class="rr-l">Weight</div><div class="rr-v">${w == null ? "--.--%" : w.toFixed(2) + "%"}</div></div>`;
-		const old = slot.wrap.querySelector(".rr-meta");
-		if (old) {
-			if (old.innerHTML !== html) old.innerHTML = html;
-		} else slot.wrap.appendChild(el("div", "rr-meta", html));
+			`<span class="rr-kvi"><span class="rr-l">Min</span><span class="rr-v">${req == null ? "--" : req}</span></span>` +
+			`<span class="rr-kvi"><span class="rr-l">Weight</span><span class="rr-v">${w == null ? "--.--%" : w.toFixed(2) + "%"}</span></span>`;
+		const kv = q(footer(slot.wrap), ".rr-kv");
+		if (kv.innerHTML !== html) kv.innerHTML = html;
 	}
 
 	// failed is the server's decision for this slot; callers look their OC up once, not once per slot.
@@ -810,34 +1013,70 @@
 		let bar = slot.wrap.querySelector(".rr-cp");
 		if (!failed && !deg) { bar?.remove(); return; }
 		if (!bar) {
-			bar = el("div", "rr-cp", "<i></i>");
-			slot.wrap.insertBefore(bar, slot.wrap.querySelector(".rr-meta"));
+			bar = el("div", "rr-cp", `<div class="rr-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-label="Planning progress"><i></i></div><span class="rr-pct" aria-hidden="true"></span>`);
+			footer(slot.wrap).appendChild(bar);
 		}
 		const pctNum = failed ?
 			100 :
 			Math.max(0, Math.min(100, Math.round(parseFloat(deg[1]) / 3.6)));
 		bar.classList.toggle("rr-fail", failed);
 		bar.classList.toggle("rr-amber", !failed && pctNum < 100);
-		const pct = pctNum + "%";
-		if (bar.firstChild.style.width !== pct) bar.firstChild.style.width = pct;
+		const pct = pctNum + "%", label = failed ? "Failed" : pct;
+		const track = bar.firstChild, text = bar.lastChild;
+		if (track.firstChild.style.width !== pct) track.firstChild.style.width = pct;
+		if (track.getAttribute("aria-valuetext") !== label) { track.setAttribute("aria-valuenow", pctNum); track.setAttribute("aria-valuetext", label); }
+		if (text.textContent !== label) text.textContent = label;
+	}
+
+	// One pill, keyed so an unchanged pill is never rewritten (a rewrite inside the crimes root triggers a render).
+	function setPill(pill, band, label, value, result = null) {
+		const key = [band, label, value, result].join("|");
+		if (pill.dataset.k === key && pill.querySelector(".rr-pv")) return;
+		pill.dataset.k = key;
+		pill.dataset.band = band;
+		pill.innerHTML = result ?
+			`<span class="rr-vh">Result: </span>${icon(result === "Success" ? "check" : "close", 12)}<span class="rr-pv">${result}</span>` :
+			`<span class="rr-pl">${label}<span class="rr-vh"> chance</span></span><span class="rr-pv">${value}</span>`;
+	}
+
+	// A completed crime's outcome: Torn's crime status, the server's failed flag, or the result Torn shows on the panel.
+	function crimeResult(info, decision) {
+		const status = String(FactionCrimes.byId?.[info.ocId]?.status || "");
+		const scenario = q(info.panel, sel("scenario"));
+		if (/fail/i.test(status) || decision.slots.some((s) => s.failed === true) || (scenario && q(scenario, sel("failed")))) return "Failure";
+		if (/success/i.test(status) || (scenario && q(scenario, sel("success")))) return "Success";
+		return null;
 	}
 
 	function renderInfoRow(info, decision) {
 		const { panel, ocId } = info;
-		if (!decision.probability) { panel.querySelector(".rr-info")?.remove(); infoRows.delete(ocId); return; }
+		const result = activeTab() === "Completed" ? crimeResult(info, decision) : null;
+		// A slot you can join now: open (no member), not locked to you, and the server says you fit it.
+		const open = !result && info.slots.some((s, i) => !s.xid && !decision.slots[i].locked && decision.slots[i].fill === "green");
+		if (!decision.probability && !result && !open) { panel.querySelector(".rr-info")?.remove(); infoRows.delete(ocId); return; }
 		let row = panel.querySelector(".rr-info") || el("div", "rr-info");
+		const tag = row.querySelector(".rr-join");
+		if (open && !tag) row.appendChild(el("span", "rr-join", `<span class="rr-mark" aria-hidden="true"></span><span>Open<span class="rr-join-more"> to you</span></span>`));
+		else if (!open) tag?.remove();
+		if (!decision.probability && !result) {
+			row.querySelector(".rr-success")?.remove();
+			if (!panel.contains(row)) q(panel, sel("panelTitle"))?.after(row);
+			infoRows.set(ocId, row);
+			return;
+		}
 		let pill = row.querySelector(".rr-success") || el("span", "rr-success");
-		const c = safeColour(decision.successColour);
-		pill.style.setProperty("--rr-c", c);
 		const success = finite(decision.success);
-		const result = Analysis.error ? "unavailable" : success == null ? (Success.cache.has(decision.probability.key) ? "n/a" : "…") : (success * 100).toFixed(2) + "%";
-		const html = `<span class="rr-pip" style="background:${c}"></span>Success: ${result}`;
-		if (pill.innerHTML !== html) pill.innerHTML = html;
+		const value = Analysis.error ? "unavailable" : success == null ? (decision.probability && Success.cache.has(decision.probability.key) ? "n/a" : "…") : (success * 100).toFixed(2) + "%";
+		const band = result ? (result === "Success" ? "ok" : "below") : BAND[safeColour(decision.successColour).toLowerCase()] || "none";
+		setPill(pill, band, "Success", value, result);
+		// On Completed the result word replaces the chance; the chance stays in the pill's tooltip.
+		const title = result && success != null ? `Success chance ${value}` : "";
+		if (pill.title !== title) pill.title = title;
 		if (!row.contains(pill)) row.appendChild(pill);
 		if (!panel.contains(row)) q(panel, sel("panelTitle"))?.after(row);
 		infoRows.set(ocId, row);
 		const query = decision.probability;
-		if (Success.due(query.key)) Success.get(query.scenario, query.params, scheduleRender);
+		if (query && Success.due(query.key)) Success.get(query.scenario, query.params, scheduleRender);
 	}
 
 	const relative = (e) => {
@@ -850,14 +1089,18 @@
 	const FILL_SELECTOR = FILL.map((c) => "." + c).join(", ");
 
 	function renderStatusIcon(s, onCompleted) {
-		let icon = s.wrap.querySelector(".rr-stat");
+		let chip = s.wrap.querySelector(".rr-stat");
 		const st = !onCompleted && s.xid && TornApi.members ?
 			TornApi.statusFor(s.xid) :
 			null;
 		const svg = st && STATUS_ICON[st.state];
-		if (!svg) { icon?.remove(); return; }
-		if (!icon) { icon = el("span", "rr-stat"); relative(s.wrap); s.wrap.appendChild(icon); }
-		if (icon.dataset.st !== st.state) { icon.dataset.st = st.state; icon.innerHTML = svg; }
+		if (!svg) { chip?.remove(); return; }
+		if (!chip) { chip = el("span", "rr-stat"); q(footer(s.wrap), ".rr-top").appendChild(chip); }
+		if (chip.dataset.st !== st.state) {
+			chip.dataset.st = st.state;
+			chip.title = STATUS_WORD[st.state];
+			chip.innerHTML = svg + `<span class="rr-vh">${STATUS_WORD[st.state]}</span>`;
+		}
 	}
 
 	function humanLeft(secs) {
@@ -938,14 +1181,21 @@
 			s.header.classList.toggle("rr-item-missing", d.itemMissing);
 			renderStatusIcon(s, tab === "Completed");
 			for (const fill of FILL) s.wrap.classList.toggle(fill, fill === "rr-fill-" + d.fill);
+			const foot = footer(s.wrap);
+			renderFill(foot, FILL_KEY[d.fill]);
 			let lock = s.wrap.querySelector(".rr-lock");
 			if (d.locked) {
-				relative(s.wrap);
-				const required = finite(d.required);
-				const html = `<span>Not Eligible: Requires: ${required == null ? "--" : required}+</span>`;
-				if (!lock) s.wrap.appendChild(el("div", "rr-lock", html));
-				else if (lock.innerHTML !== html) lock.innerHTML = html;
+				relative(s.wrap); // the lock line's cover spans the whole slot, as before
+				const required = finite(d.required), need = String(required == null ? "--" : required);
+				if (!lock) { lock = el("div", "rr-lock"); foot.appendChild(lock); }
+				if (lock.dataset.need !== need) {
+					lock.dataset.need = need;
+					lock.innerHTML = `${icon("lock", 12)}<span>Not eligible: <span class="rr-keep">needs ${need}+</span></span>`;
+				}
 			} else lock?.remove();
+			const item = foot.querySelector(".rr-item");
+			if (d.itemMissing && !item) foot.appendChild(el("div", "rr-item", `${icon("warn", 12)}<span>Missing item</span>`));
+			else if (!d.itemMissing) item?.remove();
 		});
 	}
 
@@ -956,9 +1206,35 @@
 
 	function listContainer() { return document.querySelector("div[data-oc-id]")?.parentElement || null; }
 
-	const SORT_LABELS = { default: "Sort: default", "success-desc": "Success ↓", "success-asc": "Success ↑", "level-desc": "Level ↓", "level-asc": "Level ↑" };
+	const SORT_LABELS = { default: "Torn order", "success-desc": "Best success first", "success-asc": "Lowest success first", "level-desc": "Highest level first", "level-asc": "Lowest level first" };
 	const SORT_OPTIONS = Object.keys(SORT_LABELS);
-	const LEGEND = [["#029e7a", "Eligible"], ["#db7b2b", "Close"], ["#cc3232", "Below"], ["#6a6a6a", "No data"]];
+	const GATE = {
+		nokey: ["key", "Add your Torn API key to start"],
+		denied: ["lock", "Access restricted to Ruthless Reborn members"],
+		unavailable: ["warn", "Authorization unavailable"],
+		verifying: ["info", "Verifying access…"],
+	};
+	// The script's own words on how the key is used, shown behind a closed disclosure in settings.
+	const KEY_NOTES = [
+		["Storage", "Your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself."],
+		["Sharing", "Sent to the RR server (membership check) and to ZZCraft (OC thresholds, sent as an X-Api-Key header)."],
+		["Purpose", "Ruthless Reborn faction organised crime planning."],
+		["Key storage", "Your userscript manager's storage, or TornPDA's storage."],
+		["Access level", "Public Access key only."],
+	];
+	const sortRows = (name, rowCls, nameCls, tickHtml) => SORT_OPTIONS.map((v) =>
+		`<label class="${rowCls}"><input type="radio" class="rr-vh" name="${name}" value="${v}"${v === Toolbar.state.sort ? " checked" : ""}>` +
+		`<span${nameCls ? ` class="${nameCls}"` : ""}>${SORT_LABELS[v]}</span>${tickHtml}</label>`).join("");
+
+	// The toolbar's Sort pop-up and the settings list both drive the same sort choice, storage and re-render.
+	function setSort(value) {
+		if (!SORT_OPTIONS.includes(value)) return;
+		Toolbar.state.sort = value;
+		storeSet("rr_oc_sort", value);
+		qa(document, ".rr-tvalue").forEach((n) => { if (n.textContent !== SORT_LABELS[value]) n.textContent = SORT_LABELS[value]; });
+		qa(document, 'input[name^="rr-oc-sort"]').forEach((r) => { r.checked = r.value === value; });
+		scheduleRender();
+	}
 
 	async function applyApiKey(value) {
 		if (apiKeyChanging) throw new Error("API key change already in progress");
@@ -992,54 +1268,61 @@
 
 	function openSettings(trigger) {
 		const existing = document.getElementById("rr-oc-settings");
-		if (existing) { q(existing, ".rr-set-input")?.focus(); return; }
+		if (existing) { q(existing, ".rr-key-input")?.focus(); return; }
 		settingsTrigger = trigger || document.activeElement;
 
-		const overlay = el("div", "rr-set-overlay");
-		overlay.id = "rr-oc-settings";
-		const modal = el("div", "rr-set-modal", `
-      <div class="rr-set-head">
-		<b id="rr-oc-settings-title">RR OC AUTOPILOT</b>
-        <button type="button" class="rr-set-close" aria-label="Close settings">&times;</button>
-      </div>
-      <div class="rr-set-body">
-        <div class="rr-set-section">
-          <div class="rr-set-title">Torn API key (Public Access)</div>
-          <input type="password" class="rr-set-input" placeholder="Paste your Public Access key"
-                 autocomplete="off" spellcheck="false" title="16 or 50 alphanumeric characters">
-          <div class="rr-set-status">No API key set</div>
-          <div class="rr-set-actions">
-            <button type="button" class="rr-api" data-action="save">Save</button>
-            <button type="button" class="rr-api" data-action="remove">Remove</button>
-          </div>
-        </div>
-        <div class="rr-set-section">
-          <div class="rr-set-title">How your API key is used</div>
-          <div class="rr-set-note"><b>Storage:</b> your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.</div>
-          <div class="rr-set-note"><b>Sharing:</b> sent to the RR server (membership check) and to ZZCraft (OC thresholds, sent as an X-Api-Key header).</div>
-          <div class="rr-set-note"><b>Purpose:</b> Ruthless Reborn faction organised crime planning.</div>
-          <div class="rr-set-note"><b>Key storage:</b> your userscript manager's storage, or TornPDA's storage.</div>
-          <div class="rr-set-note"><b>Access level:</b> Public Access key only.</div>
-        </div>
-      </div>
-    `);
-		modal.setAttribute("role", "dialog");
-		modal.setAttribute("aria-modal", "true");
-		modal.setAttribute("aria-labelledby", "rr-oc-settings-title");
-		const input = q(modal, ".rr-set-input");
-		const status = q(modal, ".rr-set-status");
+		const root = el("div", "rr-set", `
+			<div class="rr-set-backdrop"></div>
+			<div class="rr-set-layer" role="dialog" aria-modal="true" aria-labelledby="rr-oc-settings-title">
+				<section class="rr-panel">
+					<header class="rr-panel-head">
+						<div class="rr-panel-crest"><img class="rr-skull" src="${SKULL}" width="32" height="32" alt="" draggable="false">
+							<span class="rr-panel-titles"><span class="rr-panel-brand">Ruthless Reborn</span><h2 class="rr-panel-title" id="rr-oc-settings-title">OC Autopilot settings</h2></span></div>
+						<button type="button" class="rr-btn rr-btn--icon rr-set-close" aria-label="Close settings">${icon("close", 16)}</button>
+					</header>
+					<div class="rr-panel-body">
+						<section class="rr-sec" aria-labelledby="rr-oc-set-access">
+							<h3 class="rr-sec-head" id="rr-oc-set-access">Access</h3>
+							<div class="rr-key">
+								<p class="rr-set-status" id="rr-oc-key-status" role="status">No API key set</p>
+								<label class="rr-key-label" for="rr-oc-key">Torn API key</label>
+								<input type="password" class="rr-key-input" id="rr-oc-key" placeholder="Public Access key" autocomplete="off" spellcheck="false" title="16 or 50 alphanumeric characters" aria-describedby="rr-oc-key-status">
+								<div class="rr-key-actions">
+									<button type="button" class="rr-btn rr-btn--primary" data-action="save">${icon("check", 14)}Save key</button>
+									<button type="button" class="rr-btn rr-btn--ghost" data-action="remove">Remove key</button>
+								</div>
+							</div>
+						</section>
+						<section class="rr-sec" aria-labelledby="rr-oc-set-oc">
+							<h3 class="rr-sec-head" id="rr-oc-set-oc">OC Autopilot</h3>
+							<div class="rr-group"><h4 class="rr-eyebrow" id="rr-oc-set-sort">Sort crimes by</h4>
+								<div class="rr-choices" role="radiogroup" aria-labelledby="rr-oc-set-sort">${sortRows("rr-oc-sort-set", "rr-choice", "rr-choice-name", `<span class="rr-choice-check">${icon("check", 16)}</span>`)}</div></div>
+						</section>
+						<p class="rr-sec rr-version"><span>OC Autopilot</span><span class="rr-chip">v${VERSION}</span></p>
+						<details class="rr-sec rr-keyuse">
+							<summary class="rr-keyuse-sum">${icon("key", 16)}<span>How your API key is used</span>${icon("chevron", 16, "rr-keyuse-chev")}</summary>
+							<dl class="rr-keyuse-notes">${KEY_NOTES.map(([term, text]) => `<div class="rr-keyuse-note"><dt class="rr-keyuse-term">${term}</dt><dd class="rr-keyuse-text">${text}</dd></div>`).join("")}</dl>
+						</details>
+					</div>
+				</section>
+			</div>
+		`);
+		root.id = "rr-oc-settings";
+		const backdrop = q(root, ".rr-set-backdrop");
+		const input = q(root, ".rr-key-input");
+		const status = q(root, ".rr-set-status");
 		input.value = apiKey();
 
 		const setStatus = (text, state = "") => { status.textContent = text; status.dataset.state = state; };
 		settingsGateHook = () => {
 			if (!input.isConnected || !validApiKey(input.value.trim())) return;
-			if (Gate.pass()) setStatus("Valid and authorized", "ok");
+			if (Gate.pass()) setStatus("Valid and authorised", "ok");
 			else if (Gate.state === "denied") setStatus("Access restricted", "bad");
 			else if (Gate.nextTryAt > nowMs()) setStatus("Authorization unavailable", "wait");
 			else setStatus("Verifying access…", "wait");
 		};
 		if (validApiKey(apiKey())) {
-			setStatus(Gate.pass() ? "Valid and authorized" : "API key configured", Gate.pass() ? "ok" : "");
+			setStatus(Gate.pass() ? "Valid and authorised" : "API key configured", Gate.pass() ? "ok" : "");
 		}
 
 		input.addEventListener("input", () => input.removeAttribute("data-bad"));
@@ -1058,8 +1341,8 @@
 			} catch (e) { input.dataset.bad = "1"; setStatus("Protected storage unavailable", "bad"); }
 		};
 
-		modal.addEventListener("click", event => {
-			const action = event.target?.getAttribute?.("data-action");
+		root.addEventListener("click", event => {
+			const action = event.target?.closest?.("[data-action]")?.getAttribute("data-action");
 			if (action === "save") void save();
 			else if (action === "remove") {
 				input.value = "";
@@ -1069,17 +1352,18 @@
 					.catch(() => setStatus("Protected storage unavailable", "bad"));
 			}
 		});
+		root.addEventListener("change", event => { if (event.target.name === "rr-oc-sort-set") setSort(event.target.value); });
 		input.addEventListener("keydown", event => { if (event.key === "Enter") void save(); });
-		q(modal, ".rr-set-close").addEventListener("click", closeSettings);
+		q(root, ".rr-set-close").addEventListener("click", closeSettings);
 
-		let downOnOverlay = false;
-		overlay.addEventListener("mousedown", event => { downOnOverlay = event.target === overlay; });
-		overlay.addEventListener("click", event => { if (event.target === overlay && downOnOverlay) closeSettings(); });
+		// Only a click that starts and ends on the backdrop closes, so selecting text in the panel never does.
+		let downOnBackdrop = false;
+		root.addEventListener("mousedown", event => { downOnBackdrop = event.target === backdrop; });
+		backdrop.addEventListener("click", () => { if (downOnBackdrop) closeSettings(); });
 		settingsEscapeHandler = event => { if (event.key === "Escape") closeSettings(); };
 		document.addEventListener("keydown", settingsEscapeHandler);
 
-		overlay.appendChild(modal);
-		document.body.appendChild(overlay);
+		document.body.appendChild(root);
 		input.focus();
 	}
 
@@ -1089,13 +1373,47 @@
 		openSettings(document.querySelector(".rr-gear"));
 	}
 
+	// The Sort pop-up: native radios behind a compact trigger; outside click and Esc close it.
+	function wireSortPicker(bar) {
+		const trigger = q(bar, ".rr-trigger"), list = q(bar, ".rr-list"), picker = q(bar, ".rr-sort");
+		const close = (focus) => {
+			if (list.hidden) return;
+			list.hidden = true;
+			trigger.setAttribute("aria-expanded", "false");
+			document.removeEventListener("click", outside, true);
+			document.removeEventListener("keydown", onKey, true);
+			if (focus && trigger.isConnected) trigger.focus();
+		};
+		const outside = (event) => { if (!picker.contains(event.target)) close(false); };
+		const onKey = (event) => { if (event.key === "Escape") { event.stopPropagation(); close(true); } };
+		trigger.addEventListener("click", () => {
+			if (!list.hidden) { close(false); return; }
+			list.hidden = false;
+			trigger.setAttribute("aria-expanded", "true");
+			q(list, "input:checked")?.focus({ preventScroll: true });
+			document.addEventListener("click", outside, true);
+			document.addEventListener("keydown", onKey, true);
+		});
+		list.addEventListener("change", (event) => { setSort(event.target.value); close(true); });
+	}
+
 	const Toolbar = {
 		state: { sort: ((s) => SORT_OPTIONS.includes(s) ? s : "default")(storeGet("rr_oc_sort")) },
-		gateMessage() {
-			if (!apiKey()) return "Enter your Torn API key to activate";
-			return Gate.state === "denied" ?
-				"Access restricted" :
-				Gate.nextTryAt > nowMs() ? "Authorization unavailable" : "Verifying access…";
+		gateKind() {
+			if (!apiKey()) return "nokey";
+			return Gate.state === "denied" ? "denied" : Gate.nextTryAt > nowMs() ? "unavailable" : "verifying";
+		},
+		// The gated bar follows the access state; on Completed it keeps the shorter Completed height.
+		updateGate(bar, tab) {
+			const kind = this.gateKind();
+			const cls = `rr-bar rr-gate--${kind}${tab === "Completed" ? " rr-short" : ""}`;
+			const section = bar.firstElementChild;
+			if (section.className !== cls) section.className = cls;
+			const msg = q(bar, ".rr-gate");
+			if (msg.dataset.kind !== kind) {
+				msg.dataset.kind = kind;
+				msg.innerHTML = `${icon(GATE[kind][0], 16, "rr-gate-icon")}<span class="rr-auth-state">${GATE[kind][1]}</span>`;
+			}
 		},
 		ensure(tab, gateOnly = false) {
 			const mode = gateOnly ? "gate" : tab === "Completed" ? "completed" : "full";
@@ -1106,38 +1424,34 @@
 				tab === "Recruiting" || tab === "Planning" || tab === "Completed";
 			if (!allowed) { bar?.remove(); return; }
 			if (bar) {
-				if (gateOnly) {
-					const c = bar.querySelector(".rr-auth-state");
-					const msg = this.gateMessage();
-					if (c && c.textContent !== msg) c.textContent = msg;
-				}
+				if (gateOnly) this.updateGate(bar, tab);
 				return;
 			}
 			const list = listContainer();
 			if (!list) return;
 			bar = el("div", "rr-toolbar");
 			bar.dataset.mode = mode;
+			const brand = `<div class="rr-brand"><img class="rr-skull" src="${SKULL}" width="24" height="24" alt="" draggable="false">` +
+				`<span class="rr-titles"><span class="rr-kicker">Ruthless Reborn</span><span class="rr-name">OC Autopilot</span></span></div>`;
+			const gear = `<button class="rr-gear" type="button" title="Settings" aria-label="Open settings">${icon("settings", 18)}</button>`;
+			const sort = `<div class="rr-sort"><button type="button" class="rr-trigger" aria-controls="rr-oc-sort-list" aria-expanded="false">${icon("sort", 16, "rr-ticon")}` +
+				`<span class="rr-ttext"><span class="rr-tlabel">Sort</span><span class="rr-tvalue">${SORT_LABELS[this.state.sort]}</span></span>${icon("chevron", 14, "rr-chev")}</button>` +
+				`<div class="rr-list" id="rr-oc-sort-list" hidden><p class="rr-list-head" id="rr-oc-sort-head">Sort crimes</p>` +
+				`<div class="rr-options" role="radiogroup" aria-labelledby="rr-oc-sort-head">${sortRows("rr-oc-sort-bar", "rr-option", "", icon("check", 14, "rr-tick"))}</div></div></div>`;
+			const legend = `<ul class="rr-cell rr-legend" aria-label="Slot colours">` +
+				Object.keys(FILL_WORD).map((k) => `<li class="rr-lkey" data-fill="${k}"><span class="rr-mark" aria-hidden="true"></span>${FILL_WORD[k]}</li>`).join("") + `</ul>`;
 			// The count line also says how many OCs were left out of the analysis, on every tab.
-			const gearHtml = `<button class="rr-gear" type="button" title="Settings" aria-label="Settings">&#9881;</button>`;
-			bar.innerHTML = `<span class="rr-brand">RR <small>· OC AUTOPILOT</small></span>` + (mode === "gate" ? `<span class="rr-auth-state"></span>${gearHtml}` :
-				`<span class="rr-count"></span>` + (mode === "completed" ? `<span class="rr-right">${gearHtml}</span>` :
-					`<span class="rr-legend">${LEGEND.map(([colour, label]) => `<span><i style="background:${colour}"></i>${label}</span>`).join("")}</span>` +
-					`<span class="rr-right"><select class="rr-sort">${SORT_OPTIONS.map(v => `<option value="${v}">${SORT_LABELS[v]}</option>`).join("")}</select>${gearHtml}</span>`));
+			bar.innerHTML = `<section class="rr-bar${mode === "completed" ? " rr-short" : ""}" aria-label="OC Autopilot">${brand}` + (mode === "gate" ?
+				`<p class="rr-cell rr-gate" role="status"></p><div class="rr-tools">${gear}</div>` :
+				`<div class="rr-cell rr-count"></div>` + (mode === "completed" ? `<div class="rr-tools">${gear}</div>` : `${legend}<div class="rr-tools">${sort}${gear}</div>`)) +
+				`</section>`;
 			list.before(bar);
-			if (mode === "gate") {
-				bar.querySelector(".rr-auth-state").textContent = this.gateMessage();
-			} else if (mode === "full") {
-				bar.querySelector(".rr-sort").value = this.state.sort;
-				bar.querySelector(".rr-sort").addEventListener("change", (e) => {
-					this.state.sort = e.target.value;
-					storeSet("rr_oc_sort", this.state.sort);
-					scheduleRender();
-				});
-			}
-			const gear = bar.querySelector(".rr-gear");
-			const onGear = event => { event.preventDefault(); event.stopPropagation(); openSettings(gear); };
-			gear.addEventListener("mousedown", onGear);
-			gear.addEventListener("click", onGear);
+			if (mode === "gate") this.updateGate(bar, tab);
+			else if (mode === "full") wireSortPicker(bar);
+			const gearBtn = bar.querySelector(".rr-gear");
+			const onGear = event => { event.preventDefault(); event.stopPropagation(); openSettings(gearBtn); };
+			gearBtn.addEventListener("mousedown", onGear);
+			gearBtn.addEventListener("click", onGear);
 		},
 	};
 
@@ -1153,11 +1467,16 @@
 		}
 		const countEl = document.querySelector(".rr-count");
 		if (countEl) {
-			const n = Analysis.result?.joinable, left = Analysis.skipped ? ` · ${Analysis.skipped} not analysed` : "";
-			const text = Analysis.rejected ? "Analysis rejected – update the script" :
-				!Analysis.result ? (Analysis.nextTryAt > nowMs() ? "Analysis unavailable; retrying..." : "Loading decisions...") :
-				Analysis.error ? "Decision refresh unavailable; retrying..." : `${panels.length} OCs${n ? ` · ${n} joinable` : ""}${left}`;
-			if (countEl.textContent !== text) countEl.textContent = text;
+			const n = Analysis.result?.joinable, total = panels.length, skipped = Analysis.skipped;
+			const plain = (text, cls) => `<p class="rr-main ${cls}">${text}</p>`;
+			const html = Analysis.rejected ? plain("Analysis rejected – update the script", "rr-warn") :
+				!Analysis.result ? plain(Analysis.nextTryAt > nowMs() ? "Analysis unavailable; retrying..." : "Loading decisions...", "rr-quiet") :
+				Analysis.error ? plain("Decision refresh unavailable; retrying...", "rr-quiet") :
+				`<p class="rr-main">${countEl.closest(".rr-toolbar")?.dataset.mode === "completed" || !Number.isFinite(n) ?
+					`<b class="rr-num">${total}</b> ${total === 1 ? "crime" : "crimes"}` :
+					`<b class="rr-num${n > 0 ? " rr-go" : ""}">${n}</b> of <b class="rr-num">${total}</b> open to you`}</p>` +
+				(skipped > 0 ? `<p class="rr-sub">${skipped} not analysed</p>` : "");
+			if (countEl.rrHtml !== html) { countEl.rrHtml = html; countEl.innerHTML = html; }
 		}
 	}
 
@@ -1414,6 +1733,13 @@
 			style.id = "rr-oc-style";
 			style.textContent = STYLE;
 			document.head.appendChild(style);
+			if (!document.getElementById("rr-oc-font")) {
+				const font = document.createElement("link");
+				font.id = "rr-oc-font";
+				font.rel = "stylesheet";
+				font.href = CREST_FONT_URL;
+				document.head.appendChild(font);
+			}
 			const rootObserver = new MutationObserver((muts) => {
 				// A slot header losing its rr-role marker means React rewrote its class in place; invalidate the fingerprint so the next render reapplies it.
 				for (const mut of muts) {

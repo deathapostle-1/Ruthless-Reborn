@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         RR Attack Advisor
 // @namespace    txm.fastattack
-// @version      4.2.5
+// @version      4.3.0
 // @description  Attack Page QOL Changes & RR War Condition Integration
 // @author       TXM [1712536]
 // @updateURL    https://raw.githubusercontent.com/deathapostle-1/Ruthless-Reborn/main/rr-attack-advisor.user.js
@@ -57,7 +57,7 @@
 
     const COMPACT_WIDTH = 1000;                             // Torn drops to the single-panel layout at/below this
 
-    const VERSION = '4.2.5';                                // keep in step with @version above
+    const VERSION = '4.3.0';                                // keep in step with @version above
 
     // Cross-origin auth traffic uses GM_xmlhttpRequest or TornPDA's native bridge.
     const TORN_API = 'https://api.torn.com/v2';
@@ -303,6 +303,296 @@
     // The moved buttons sit beside the chosen weapon: 100px per slot, Primary at the top.
     function getTopStyle(slotId) { return (35 + (slotId - SLOT.PRIMARY) * 100) + 'px'; }
 
+    // Crest display: the faction skull (64px webp), the Crest font and the few stroke icons the bar and panel use.
+    const SKULL = 'data:image/webp;base64,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';
+    const FONT_URL = 'https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,400..800&display=swap';
+    const ICONS = {
+        timer: '<circle cx="12" cy="13" r="8"/><path d="M12 9v4l3 2"/><path d="M9 2h6"/>',
+        escape: '<path d="M10 5H6a1 1 0 0 0-1 1v12a1 1 0 0 0 1 1h4"/><path d="M14 8l4 4-4 4M18 12H9"/>',
+        back: '<path d="M10 6l-6 6 6 6"/><path d="M4 12h11a5 5 0 0 1 5 5v1"/>',
+        settings: '<path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/>',
+        close: '<path d="M6 6l12 12M18 6L6 18"/>',
+        chevron: '<path d="M6 9l6 6 6-6"/>',
+        check: '<path d="M5 12l5 5 9-10"/>',
+        lock: '<rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V8a4 4 0 0 1 8 0v3"/>',
+        key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l8-8M16 7l2 2"/>',
+        rifle: '<path d="M2 10h13l2-2h5v3h-4l-1 2H9l-1 4H5l1-4H2z"/>',
+        pistol: '<path d="M3 7h16v4h-7l-1 2H9l-1 5H5l1-7H3z"/>',
+        blade: '<path d="M20 4L9 15"/><path d="M20 4h-3l-9 9 3 3 9-9z"/><path d="M7 14l3 3"/><path d="M4 20l3-3"/>',
+        grenade: '<circle cx="11" cy="14" r="6"/><path d="M11 8V5h4"/><path d="M15 5l2-2"/>',
+        leave: '<path d="M13 4h5v16h-5"/><path d="M10 8l-4 4 4 4"/><path d="M6 12h9"/>',
+        mug: '<path d="M6 8h12l-1 12H7z"/><path d="M9 8a3 3 0 0 1 6 0"/>',
+        hosp: '<path d="M10 4h4v6h6v4h-6v6h-4v-6H4v-4h6z"/>',
+        info: '<circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5v.5"/>',
+        warn: '<path d="M12 3l10 18H2z"/><path d="M12 10v5M12 18v.5"/>'
+    };
+    const icon = (name, size = 14, cls = '') => `<svg class="rra-icon${cls ? ' ' + cls : ''}" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" focusable="false">${ICONS[name]}</svg>`;
+    const skull = size => `<img class="rra-skull" src="${SKULL}" width="${size}" height="${size}" alt="" draggable="false">`;
+    const htmlEsc = v => String(v == null ? '' : v).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+    const SLOT_ICON = { [SLOT.PRIMARY]: 'rifle', [SLOT.SECONDARY]: 'pistol', [SLOT.MELEE]: 'blade', [SLOT.TEMP]: 'grenade' };
+    const SLOT_TILE = { [SLOT.PRIMARY]: 'weapon_main', [SLOT.SECONDARY]: 'weapon_second', [SLOT.MELEE]: 'weapon_melee', [SLOT.TEMP]: 'weapon_temp' };
+    const ATTACK_ICON = { [ATTACK.LEAVE]: 'leave', [ATTACK.MUG]: 'mug', [ATTACK.HOSP]: 'hosp' };
+    const ATTACK_FULL = { [ATTACK.LEAVE]: 'Leave', [ATTACK.MUG]: 'Mug', [ATTACK.HOSP]: 'Hospitalize' };
+
+    // Everything Crest draws sits under .rra (the bar host, the settings overlay) or on the weapon tiles the script
+    // marks, so neither Torn's CSS nor this one reaches the other. Light and dark follow Torn's body.dark-mode.
+    const CREST_CSS = `
+        .rra, [data-txm-warn], [data-txm-disarm] { --rra-font: 'Bricolage Grotesque', system-ui, -apple-system, 'Segoe UI', sans-serif; --rra-primary: #029E7A; --rra-accent: #C9A95C; }
+        body.dark-mode :is(.rra, [data-txm-warn], [data-txm-disarm]) { --rra-surface: #1b1c1e; --rra-surface-2: #232427; --rra-sunken: #141516; --rra-line: #33363a; --rra-text: #eceae4; --rra-muted: #a8a59d; --rra-primary-fg: #2fc29d; --rra-on-primary: #04211a; --rra-accent-fg: #d4b56c; --rra-ok: #4cc38a; --rra-close: #f0913e; --rra-below: #f06a5f; --rra-none: #9a9ca1; --rra-shadow: 0 12px 32px rgba(0, 0, 0, .5); }
+        body:not(.dark-mode) :is(.rra, [data-txm-warn], [data-txm-disarm]) { --rra-surface: #ffffff; --rra-surface-2: #f6f4ef; --rra-sunken: #eeebe4; --rra-line: #dcd8ce; --rra-text: #1c1d1f; --rra-muted: #5e5b54; --rra-primary-fg: #026e56; --rra-on-primary: #04211a; --rra-accent-fg: #7f6427; --rra-ok: #11704f; --rra-close: #a14a07; --rra-below: #b42318; --rra-none: #63666c; --rra-shadow: 0 12px 32px rgba(20, 20, 20, .16); }
+        body.dark-mode .rra { color-scheme: dark; }
+        body:not(.dark-mode) .rra { color-scheme: light; }
+
+        .rra { box-sizing: border-box; font-family: var(--rra-font); font-size: 12px; line-height: 1.35; color: var(--rra-text); text-align: left; letter-spacing: normal; text-transform: none; font-weight: 400; -webkit-font-smoothing: antialiased; }
+        .rra *, .rra *::before, .rra *::after { box-sizing: border-box; }
+        .rra :is(button, input) { font: inherit; color: inherit; margin: 0; letter-spacing: inherit; }
+        .rra button { cursor: pointer; }
+        .rra button:disabled { cursor: default; }
+        .rra :is(p, h2, h3, ul, dl, dt, dd) { margin: 0; padding: 0; }
+        .rra ul { list-style: none; }
+        .rra img { display: block; max-width: none; }
+        .rra [hidden] { display: none !important; }
+        .rra :focus-visible { outline: 2px solid var(--rra-accent); outline-offset: 2px; }
+        .rra .rra-vh { position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+
+        /* The bar host is a size container, so the phone layout follows the bar's own width; it gets a layer to keep its pop-ups above the fight. */
+        .txm-fa-bar { position: relative; z-index: 50; margin: 8px 0; container: rra / inline-size; }
+        .txm-fa-bar[data-pop-open] { z-index: 1001; }
+        .txm-fa-bar[data-txm-mode="auth"] { display: flex; flex-direction: column; }
+        .rra .rra-bar { position: relative; display: grid; grid-template-columns: auto auto minmax(0, 1fr) auto; grid-template-areas: "brand readouts . controls" "band band band band"; grid-template-rows: minmax(52px, auto) auto; column-gap: 12px; align-items: center; margin: 0; padding: 0 12px; border: 1px solid var(--rra-line); border-radius: 6px; background: var(--rra-surface); box-shadow: inset 0 2px 0 #029E7A; color: var(--rra-text); font-family: var(--rra-font); font-size: 12px; font-weight: 400; line-height: 1.35; text-align: left; }
+        .rra .rra-bar--gated { flex: 1 1 auto; grid-template-rows: minmax(52px, auto) 1fr; }
+
+        .rra .rra-brand { grid-area: brand; display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .rra .rra-brand .rra-skull { flex: none; width: 30px; height: 30px; }
+        .rra .rra-title { display: flex; flex-direction: column; line-height: 1.15; white-space: nowrap; }
+        .rra .rra-eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--rra-accent-fg); }
+        .rra .rra-name { font-size: 15px; font-weight: 800; color: var(--rra-text); }
+
+        .rra .rra-readouts { grid-area: readouts; align-self: stretch; display: flex; min-width: 0; margin: 0; padding: 0; border-right: 1px solid var(--rra-line); }
+        .rra .rra-cell { display: flex; flex-direction: column; justify-content: center; min-width: 0; padding: 0 12px; border-left: 1px solid var(--rra-line); }
+        .rra .rra-label { margin: 0; font-size: 10.5px; font-weight: 400; line-height: 1.3; color: var(--rra-muted); white-space: nowrap; }
+        .rra .rra-value { display: flex; align-items: baseline; gap: 4px; margin: 0; font-size: 14px; font-weight: 700; line-height: 1.25; color: var(--rra-text); font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .rra .rra-value b { font-weight: inherit; }
+        .rra .rra-sub { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 500; color: var(--rra-muted); }
+        .rra .rra-sub:empty { display: none; }
+        .rra .rra-cell[data-low="1"] .rra-sub { font-weight: 700; color: var(--rra-close); }
+        .rra .rra-cell:not([data-low="1"]) .rra-low { display: none; }
+        .rra .rra-status { display: inline-flex; flex: none; align-self: flex-start; align-items: center; gap: 4px; min-height: 24px; margin: 0; padding: 0 8px; border: 1px solid color-mix(in srgb, var(--rra-primary) 55%, transparent); border-radius: 3px; font-size: 11px; font-weight: 700; color: var(--rra-primary-fg); white-space: nowrap; }
+
+        .rra .rra-nav { display: flex; flex: none; min-width: 0; padding-right: 16px; border-right: 1px solid var(--rra-line); }
+        .rra .rra-back { display: inline-flex; align-items: center; gap: 4px; min-width: 0; min-height: 20px; border-radius: 4px; font-size: 11px; font-weight: 500; color: var(--rra-muted); text-decoration: none; }
+        .rra .rra-back .rra-icon { flex: none; }
+        .rra .rra-back span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        .rra .rra-back:hover { color: var(--rra-text); }
+        .rra .rra-back:hover span { text-decoration: underline; text-underline-offset: 2px; }
+
+        .rra .rra-controls { grid-area: controls; display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
+        .rra .rra-btn { display: inline-flex; flex: none; align-items: center; justify-content: center; gap: 8px; height: 32px; margin: 0; padding: 0 12px; border: 1px solid transparent; border-radius: 4px; background: transparent; color: var(--rra-text); font-family: inherit; font-size: 12px; font-weight: 700; line-height: 1; white-space: nowrap; appearance: none; }
+        .rra .rra-btn .rra-icon { flex: none; }
+        .rra .rra-btn--primary { border-color: var(--rra-primary); background: var(--rra-primary); color: var(--rra-on-primary); }
+        .rra .rra-btn--primary:not(:disabled):hover { filter: brightness(1.08); }
+        .rra .rra-btn--primary:disabled { border-color: var(--rra-line); background: var(--rra-surface-2); color: var(--rra-muted); filter: none; }
+        .rra .rra-btn--ghost { border-color: var(--rra-line); }
+        .rra .rra-btn--ghost:hover { border-color: var(--rra-accent); }
+        .rra .rra-btn--icon { width: 32px; padding: 0; border-color: color-mix(in srgb, var(--rra-accent) 55%, transparent); color: var(--rra-accent-fg); }
+        .rra .rra-btn--icon:hover { background: color-mix(in srgb, var(--rra-accent) 12%, transparent); }
+
+        .rra .rra-pick { position: relative; min-width: 0; }
+        .rra .rra-trigger { display: flex; align-items: center; gap: 4px; height: 32px; margin: 0; padding: 0 8px; border: 1px solid var(--rra-line); border-radius: 4px; background: var(--rra-surface-2); color: var(--rra-text); font-family: inherit; font-size: 12px; font-weight: 400; line-height: 1.15; text-align: left; appearance: none; }
+        .rra .rra-trigger:hover { border-color: color-mix(in srgb, var(--rra-accent) 55%, transparent); }
+        .rra .rra-trigger[aria-expanded="true"] { border-color: var(--rra-accent); }
+        .rra .rra-trigger__lead { display: flex; flex: none; margin-right: 4px; color: var(--rra-muted); }
+        .rra .rra-trigger__text { display: flex; flex-direction: column; min-width: 0; }
+        .rra .rra-trigger__over { font-size: 10.5px; color: var(--rra-muted); white-space: nowrap; }
+        .rra .rra-trigger__value { max-width: 112px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 700; }
+        .rra .rra-trigger__chev { flex: none; color: var(--rra-muted); transition: transform .15s ease; }
+        .rra .rra-trigger[aria-expanded="true"] .rra-trigger__chev { transform: rotate(180deg); }
+        .rra .rra-slot[data-empty="1"] .rra-trigger__value { color: var(--rra-muted); }
+        .rra .rra-show { display: none; }
+        .rra .rra-slot[data-cur="1"] .rra-show--1, .rra .rra-slot[data-cur="2"] .rra-show--2, .rra .rra-slot[data-cur="3"] .rra-show--3, .rra .rra-slot[data-cur="4"] .rra-show--4 { display: block; }
+
+        .rra .rra-pop { position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; display: flex; flex-direction: column; width: max-content; min-width: 220px; max-width: min(320px, calc(100cqw - 16px)); margin: 0; padding: 4px; border: 1px solid var(--rra-line); border-radius: 6px; background: var(--rra-surface); box-shadow: inset 0 1px 0 color-mix(in srgb, var(--rra-accent) 35%, transparent), var(--rra-shadow); }
+        .rra .rra-pop__row { position: relative; display: grid; grid-template-columns: 16px minmax(0, 1fr) 14px; align-items: center; gap: 8px; min-height: 40px; margin: 0; padding: 4px 8px; border-radius: 4px; color: var(--rra-text); font-weight: 400; cursor: pointer; }
+        .rra .rra-pop__row:hover { background: var(--rra-surface-2); }
+        .rra .rra-pop__row input { position: absolute; inset: 0; width: 100%; height: 100%; margin: 0; opacity: 0; cursor: pointer; }
+        .rra .rra-pop__row:has(input:focus-visible) { outline: 2px solid var(--rra-accent); outline-offset: -2px; }
+        .rra .rra-pop__icon { color: var(--rra-muted); }
+        .rra .rra-pop__text { display: flex; flex-direction: column; min-width: 0; }
+        .rra .rra-pop__name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; font-weight: 700; line-height: 1.25; }
+        .rra .rra-pop__sub { font-size: 10.5px; line-height: 1.25; color: var(--rra-muted); white-space: nowrap; }
+        .rra .rra-pop__check { color: var(--rra-primary-fg); visibility: hidden; }
+        .rra .rra-pop__row input:checked ~ .rra-pop__check { visibility: visible; }
+        .rra .rra-pop__row[data-empty="1"] .rra-pop__name { font-weight: 600; color: var(--rra-muted); }
+
+        /* Row 2, the sunken band: back link, advice, notices and war limits; a banner while Start Fight is paused, blocked or unchecked. */
+        .rra .rra-band { grid-area: band; display: flex; flex-direction: column; justify-content: center; gap: 8px; min-width: 0; min-height: 36px; margin: 0 -12px; padding: 8px 12px; border-top: 1px solid var(--rra-line); border-radius: 0 0 5px 5px; background: var(--rra-sunken); }
+        .rra .rra-bar--gated .rra-band { align-self: stretch; }
+        .rra .rra-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 16px; min-width: 0; }
+        .rra .rra-row:not(:has(> :not([hidden]))) { display: none; }
+        .rra .rra-advice-list { display: flex; flex: 1 1 320px; flex-wrap: wrap; align-items: center; gap: 4px 16px; min-width: 0; margin: 0; padding: 0; list-style: none; font-size: 12px; }
+        .rra .rra-band[data-alert] .rra-advice-list { flex-basis: 240px; font-size: 11px; }
+        .rra .rra-adv { display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; padding: 0; color: var(--rra-text); }
+        .rra .rra-adv[title] { cursor: help; }
+        .rra .rra-adv--none { font-size: 11px; color: var(--rra-muted); }
+        .rra .rra-adv[data-level="avoid"] { --rra-level: var(--rra-below); }
+        .rra .rra-adv[data-level="caution"] { --rra-level: var(--rra-close); }
+        .rra .rra-adv[data-level="ok"] { --rra-level: var(--rra-ok); }
+        .rra .rra-adv[data-level="unknown"] { --rra-level: var(--rra-none); }
+        .rra .rra-diamond { flex: none; width: 7px; height: 7px; margin-right: 4px; background: var(--rra-level, var(--rra-muted)); transform: rotate(45deg); }
+        .rra .rra-adv[data-level="unknown"] .rra-diamond { background: transparent; box-shadow: inset 0 0 0 1.5px var(--rra-level); }
+        .rra .rra-adv__icon { flex: none; color: var(--rra-level, var(--rra-muted)); }
+        .rra .rra-adv__text { min-width: 0; }
+        .rra .rra-notice { display: flex; align-items: center; gap: 4px; min-width: 0; margin: 0; font-size: 11px; font-weight: 700; color: var(--rra-below); }
+        .rra .rra-notice .rra-icon { flex: none; }
+
+        .rra .rra-limits { display: flex; flex: 0 1 auto; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 4px 12px; margin: 0 0 0 auto; font-size: 11px; line-height: 1.35; color: var(--rra-muted); font-variant-numeric: tabular-nums; }
+        .rra .rra-lim { white-space: nowrap; }
+        .rra .rra-limits b { font-weight: 700; color: var(--rra-text); }
+        .rra .rra-limits b[data-ok="0"] { color: var(--rra-below); }
+        .rra .rra-age { font-size: 10.5px; white-space: nowrap; }
+        .rra .rra-age[data-stale="1"] { color: var(--rra-close); }
+        .rra .rra-left { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; font-weight: 600; color: var(--rra-primary-fg); white-space: nowrap; }
+        .rra .rra-limits .rra-left b { font-weight: 800; color: inherit; }
+        .rra .rra-left .rra-icon { flex: none; }
+        .rra .rra-left--none { color: var(--rra-below); }
+        .rra .rra-left--quiet { color: var(--rra-text); }
+
+        .rra .rra-banner { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; min-height: 36px; margin: 0; padding: 8px 12px; border: 1px solid var(--rra-accent); border-radius: 6px; background: color-mix(in srgb, var(--rra-accent) 10%, var(--rra-surface)); }
+        .rra .rra-banner[data-kind="blocked"] { --rra-banner: var(--rra-below); border-color: var(--rra-below); background: color-mix(in srgb, var(--rra-below) 14%, var(--rra-surface)); }
+        .rra .rra-banner[data-kind="warn"] { --rra-banner: var(--rra-close); border-color: var(--rra-close); background: color-mix(in srgb, var(--rra-close) 14%, var(--rra-surface)); }
+        .rra .rra-banner__icon { display: flex; flex: none; color: var(--rra-banner, var(--rra-accent-fg)); }
+        .rra .rra-banner__msg { flex: 1 1 240px; min-width: 0; margin: 0; font-size: 12.5px; font-weight: 700; line-height: 1.3; color: var(--rra-text); }
+        .rra .rra-banner .rra-limits { margin-left: auto; }
+
+        .rra .rra-gate { display: flex; align-items: center; gap: 8px; margin: 0; font-size: 12.5px; font-weight: 600; line-height: 1.3; color: var(--rra-text); }
+        .rra .rra-gate__icon { display: flex; flex: none; color: var(--rra-accent-fg); }
+        .rra .rra-bar[data-access="denied"] .rra-gate__icon { color: var(--rra-below); }
+
+        /* Desktop and tablet: the Outcome list shows inline as a segmented control. */
+        @container rra (min-width: 641px) {
+            .rra .rra-outcome__trigger { display: none; }
+            .rra .rra-bar .rra-outcome__list[hidden] { display: grid !important; }
+            .rra .rra-outcome__list { position: static; display: grid; grid-auto-flow: column; grid-auto-columns: 1fr; width: auto; min-width: 0; max-width: none; padding: 0; overflow: hidden; border-radius: 4px; background: var(--rra-surface-2); box-shadow: none; }
+            .rra .rra-outcome__opt { display: flex; justify-content: center; gap: 4px; min-height: 30px; padding: 0 8px; border-radius: 0; }
+            .rra .rra-outcome__opt + .rra-outcome__opt { border-left: 1px solid var(--rra-line); }
+            .rra .rra-outcome__opt:hover { background: color-mix(in srgb, var(--rra-accent) 10%, var(--rra-surface-2)); }
+            .rra .rra-outcome__opt .rra-pop__name { font-size: 12px; font-weight: 500; }
+            .rra .rra-outcome__opt .rra-pop__check { display: none; }
+            .rra .rra-outcome__full { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+            .rra .rra-outcome__opt:has(input:checked) { background: var(--rra-primary); color: var(--rra-on-primary); }
+            .rra .rra-outcome__opt:has(input:checked) .rra-pop__icon { color: var(--rra-on-primary); }
+            .rra .rra-outcome__opt:has(input:checked) .rra-pop__name { font-weight: 700; }
+        }
+        /* Narrow desktop and tablet: the controls take their own row. */
+        @container rra (min-width: 641px) and (max-width: 919px) {
+            .rra .rra-bar { grid-template-columns: auto auto minmax(0, 1fr); grid-template-areas: "brand readouts ." "controls controls controls" "band band band"; grid-template-rows: minmax(52px, auto) auto auto; }
+            .rra .rra-controls { justify-self: end; padding-bottom: 8px; }
+            .rra .rra-bar--gated .rra-controls { padding-bottom: 0; }
+        }
+        /* Desktop and tablet: Torn's header still shows under the gated bar, so it is one compact row (the message in
+           a ruled cell) that holdBarSpace pads to the full bar's height less that header. */
+        @container rra (min-width: 641px) {
+            .rra .rra-bar.rra-bar--gated { grid-template-columns: auto minmax(0, 1fr) auto; grid-template-areas: "brand band controls"; grid-template-rows: minmax(42px, 1fr); }
+            .rra .rra-bar--gated .rra-band { min-height: 0; margin: 0; padding: 0 12px; border-top: 0; border-left: 1px solid var(--rra-line); border-radius: 0; background: none; }
+        }
+        /* Phone: compact readouts beside the skull, then 44px pickers, Escape and settings, then the band. */
+        @container rra (max-width: 640px) {
+            .rra .rra-bar { grid-template-columns: auto minmax(0, 1fr); grid-template-areas: "brand readouts" "controls controls" "band band"; grid-template-rows: minmax(48px, auto) auto auto; column-gap: 8px; padding: 0 8px; }
+            .rra .rra-bar--gated { grid-template-areas: "brand controls" "band band"; grid-template-rows: minmax(48px, auto) 1fr; }
+            .rra .rra-bar[data-readouts="some"] .rra-title { position: absolute; width: 1px; height: 1px; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
+            .rra .rra-readouts { border-right: 0; }
+            .rra .rra-cell { flex: 1 1 auto; padding: 0 8px; }
+            .rra .rra-value { font-size: 13px; }
+            .rra .rra-controls { position: relative; display: grid; grid-template-columns: minmax(0, 1fr) auto auto auto; padding-bottom: 8px; }
+            .rra .rra-bar--gated .rra-controls { display: flex; padding-bottom: 0; }
+            .rra .rra-pick { position: static; }
+            .rra .rra-trigger { height: 44px; }
+            .rra .rra-slot__trigger { width: 100%; }
+            .rra .rra-slot__trigger .rra-trigger__text { flex: 1 1 auto; }
+            .rra .rra-trigger__value { max-width: none; }
+            .rra .rra-escape { gap: 4px; height: 44px; padding: 0 8px; }
+            .rra .rra-settings { width: 44px; height: 44px; }
+            .rra .rra-pop { top: calc(100% - 4px); right: 0; width: auto; min-width: 0; max-width: none; }
+            .rra .rra-pop__row { min-height: 44px; }
+            .rra .rra-outcome__short { display: none; }
+            .rra .rra-nav { flex: 1 1 100%; padding-right: 0; border-right: 0; }
+            .rra .rra-back { min-height: 32px; font-size: 12px; }
+            .rra .rra-band { margin: 0 -8px; padding: 4px 8px 8px; }
+            .rra .rra-row { gap: 4px 12px; }
+            .rra .rra-advice-list { flex: 1 1 100%; gap: 4px 12px; }
+            .rra .rra-limits { flex: 1 1 100%; justify-content: flex-start; margin-left: 0; }
+            .rra .rra-banner .rra-limits { margin-left: 0; padding-left: 24px; }
+            .rra .rra-bar--gated .rra-band { align-items: center; padding: 8px; }
+            .rra .rra-bar--gated .rra-gate { flex-direction: column; text-align: center; }
+        }
+        @container rra (max-width: 359px) {
+            .rra .rra-slot__trigger .rra-trigger__lead { display: none; }
+            .rra .rra-escape .rra-icon { display: none; }
+        }
+
+        /* Weapon tags sit on Torn's tiles as pseudo-elements, so nothing is added inside React's markup. */
+        [data-txm-warn], [data-txm-disarm] { position: relative; }
+        [data-txm-warn]::after, [data-txm-disarm]::before { position: absolute; right: 5px; bottom: 26px; z-index: 6; pointer-events: none; display: block; margin: 0; padding: 2px 6px; border: 1px solid currentColor; border-radius: 3px; background: var(--rra-surface); box-shadow: 0 1px 2px rgba(0, 0, 0, .25); font-family: var(--rra-font); font-size: 10.5px; font-style: normal; font-weight: 700; line-height: 14px; letter-spacing: normal; text-transform: none; white-space: nowrap; }
+        [data-txm-warn]::after { content: "\\25C6\\2002" attr(data-txm-label); color: var(--rra-muted); }
+        [data-txm-warn="avoid"]::after { color: var(--rra-below); }
+        [data-txm-warn="caution"]::after { color: var(--rra-close); }
+        [data-txm-disarm]::before { content: "\\25C6\\2002" attr(data-txm-disarm-label); color: var(--rra-close); }
+        [data-txm-warn][data-txm-disarm]::before { bottom: 49px; }
+        [data-txm-sel] { outline: 2px solid #029E7A; outline-offset: -2px; }
+
+        /* Settings: the right-side panel over a dimmed page. */
+        .rra-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999999; background: rgba(0, 0, 0, .5); }
+        .rra .rra-panel { position: absolute; top: 64px; bottom: 64px; right: 0; display: flex; flex-direction: column; width: min(380px, 100%); overflow: hidden; background: var(--rra-surface); border: 1px solid var(--rra-line); border-right: 0; box-shadow: inset 0 1px 0 color-mix(in srgb, var(--rra-accent) 35%, transparent), var(--rra-shadow); color: var(--rra-text); }
+        .rra .rra-panel :where(h2, h3, p, dl, dt, dd) { margin: 0; padding: 0; font-family: inherit; letter-spacing: normal; text-transform: none; }
+        .rra .rra-panel__head { flex: none; display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; padding: 16px; border-bottom: 1px solid var(--rra-line); }
+        .rra .rra-panel__crest { display: flex; align-items: center; gap: 8px; min-width: 0; }
+        .rra .rra-panel__crest .rra-skull { flex: none; width: 32px; height: 32px; }
+        .rra .rra-panel__titles { display: flex; flex-direction: column; min-width: 0; line-height: 1.15; }
+        .rra .rra-panel__eyebrow { font-size: 10.5px; font-weight: 600; letter-spacing: .02em; color: var(--rra-accent-fg); }
+        .rra .rra-panel__title { font-size: 15px; font-weight: 800; line-height: 1.2; color: var(--rra-text); }
+        .rra .rra-panel__body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; padding: 0 16px 16px; }
+        .rra .rra-panel__section { display: grid; gap: 12px; padding: 16px 0; border-top: 1px solid var(--rra-line); }
+        .rra .rra-panel__section:first-child { border-top: 0; }
+        .rra .rra-panel__heading { font-size: 13px; font-weight: 700; line-height: 1.3; color: var(--rra-text); }
+        .rra .rra-key { display: grid; gap: 8px; padding: 12px; border: 1px solid var(--rra-line); border-radius: 6px; background: var(--rra-surface-2); }
+        .rra .rra-key__status { --rra-dot: var(--rra-none); display: flex; align-items: center; gap: 8px; font-size: 12px; font-weight: 600; color: var(--rra-text); }
+        .rra .rra-key__status::before { content: ''; flex: none; width: 8px; height: 8px; border-radius: 999px; background: var(--rra-dot); box-shadow: 0 0 0 3px color-mix(in srgb, var(--rra-dot) 22%, transparent); }
+        .rra .rra-key__status[data-state="ok"] { --rra-dot: var(--rra-ok); }
+        .rra .rra-key__status[data-state="bad"] { --rra-dot: var(--rra-below); }
+        .rra .rra-key__status[data-state="wait"] { --rra-dot: var(--rra-accent); }
+        .rra .rra-key__label { margin-top: 4px; font-size: 11px; font-weight: 600; color: var(--rra-muted); }
+        .rra .rra-key__input { display: block; width: 100%; min-width: 0; height: 32px; padding: 0 12px; border: 1px solid var(--rra-line); border-radius: 4px; background: var(--rra-surface); color: var(--rra-text); font-size: 12px; font-variant-numeric: tabular-nums; box-shadow: none; }
+        .rra .rra-key__input::placeholder { color: var(--rra-muted); opacity: 1; }
+        .rra .rra-key__input:hover { border-color: color-mix(in srgb, var(--rra-accent) 55%, transparent); }
+        .rra .rra-key__input:focus-visible { border-color: var(--rra-accent); }
+        .rra .rra-key__input[data-bad="1"] { border-color: var(--rra-below); }
+        .rra .rra-key__actions { display: flex; flex-wrap: wrap; gap: 8px; }
+        @media (pointer: coarse) { .rra .rra-key__input { font-size: 16px; } }
+        .rra .rra-setting { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 0; border-top: 1px solid var(--rra-line); }
+        .rra .rra-setting:first-child { padding-top: 0; border-top: 0; }
+        .rra .rra-setting:last-child { padding-bottom: 0; }
+        .rra .rra-setting__name { min-width: 0; font-size: 12.5px; font-weight: 600; color: var(--rra-text); cursor: pointer; }
+        .rra .rra-switch { position: relative; flex: none; width: 34px; height: 20px; padding: 0; border: 0; border-radius: 999px; background: var(--rra-line); }
+        .rra .rra-switch::after { content: ''; position: absolute; top: -6px; right: -6px; bottom: -6px; left: -6px; }
+        .rra .rra-switch > span { position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: var(--rra-muted); transition: transform .15s ease; }
+        .rra .rra-switch[aria-checked="true"] { background: var(--rra-primary); }
+        .rra .rra-switch[aria-checked="true"] > span { transform: translateX(14px); background: #ffffff; }
+        .rra .rra-panel__version { display: flex; align-items: center; justify-content: space-between; gap: 12px; font-size: 12px; font-weight: 600; color: var(--rra-muted); }
+        .rra .rra-chip { flex: none; padding: 0 4px; border: 1px solid color-mix(in srgb, var(--rra-accent) 55%, transparent); border-radius: 3px; color: var(--rra-accent-fg); font-size: 10.5px; font-weight: 600; line-height: 18px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+        .rra .rra-keyuse { display: block; padding: 8px 0; }
+        .rra .rra-keyuse__summary { display: flex; align-items: center; gap: 8px; min-height: 40px; border-radius: 4px; list-style: none; cursor: pointer; font-size: 13px; font-weight: 700; color: var(--rra-text); }
+        .rra .rra-keyuse__summary::-webkit-details-marker { display: none; }
+        .rra .rra-keyuse__summary .rra-icon { flex: none; color: var(--rra-muted); }
+        .rra .rra-keyuse__summary:hover .rra-keyuse__chevron { color: var(--rra-accent-fg); }
+        .rra .rra-keyuse__chevron { margin-left: auto; transition: transform .15s ease; }
+        .rra .rra-keyuse[open] .rra-keyuse__chevron { transform: rotate(180deg); }
+        .rra .rra-keyuse__notes { display: grid; gap: 8px; margin-top: 8px; padding: 12px; border-radius: 6px; background: var(--rra-sunken); }
+        .rra .rra-keyuse__note { display: grid; grid-template-columns: 84px minmax(0, 1fr); gap: 4px 12px; }
+        .rra .rra-keyuse__term { font-size: 12px; font-weight: 600; color: var(--rra-text); }
+        .rra .rra-keyuse__text { font-size: 11px; line-height: 1.45; color: var(--rra-muted); }
+        @media (prefers-reduced-motion: reduce) { .rra *, .rra *::before, .rra *::after { transition: none !important; } }
+    `;
+
     // CSS notes, kept out of the shipped stylesheet:
     // - Header-hide rules only bite while .txm-fa-bar precedes the header AND
     //   carries data-txm-mirror="1"; if the bar never builds or React tears it
@@ -315,8 +605,8 @@
     //   a descendant. A hidden ancestor also never blocks their pointer events.
     // - [data-txm-block] uses pointer-events (stops mouse AND touch) and never
     //   the .disabled property, which React resets on re-render.
-    // - The compact tweaks are an @media block rather than a compact() branch
-    //   so phone rotation reacts without a stylesheet rebuild.
+    // - The bar's phone layout is a container query on its own width, so phone
+    //   rotation reacts without a stylesheet rebuild.
     function buildCss() {
         const dialogHide = `
             ${sel('dialogWrapper')}[data-txm-dialog="start"], ${sel('dialogWrapper')}[data-txm-dialog="outcome"] { visibility: hidden; }
@@ -336,117 +626,10 @@
             ${positioning}
             [data-txm-hide] { display: none !important; }
             .txm-fa-namelink { color: var(--default-color); }
-            .txm-fastattack { display: flex; align-items: center; gap: 8px; margin-top: 6px; font-size: 12px; }
-            .txm-fastattack select { background: #1f1f1f; color: #e6e6e6; border: 1px solid #444; border-radius: 4px; padding: 2px 6px; cursor: pointer; }
-            .txm-fastattack select:hover { border-color: #777; }
-            [data-txm-warn], [data-txm-disarm] { position: relative; }
-            [data-txm-warn]::after, [data-txm-disarm]::before { position: absolute; right: 4px; bottom: 26px; padding: 1px 4px; border-radius: 2px; font-size: 8px; font-weight: 700; line-height: 1.2; background: rgba(0, 0, 0, .55); pointer-events: none; z-index: 5; }
-            [data-txm-warn]::after { content: attr(data-txm-label); }
-            [data-txm-disarm]::before { content: attr(data-txm-disarm-label); color: #e0a80d; }
-            [data-txm-warn][data-txm-disarm]::before { bottom: 41px; }
-            [data-txm-warn="avoid"]::after { color: #d63b3b; }
+            [data-txm-block] { pointer-events: none !important; opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
             .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('topSection')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('delimiter')}, .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} > ${sel('bottomSection')} { display: none !important; }
             .txm-fa-bar[data-txm-mirror="1"] ~ ${sel('appHeaderWrapper')} { margin: 0 !important; padding: 0 !important; border: 0 !important; min-height: 0 !important; }
-            .txm-fa-bar { box-sizing: border-box; display: flex; flex-direction: column; gap: 6px; margin: 8px 0; padding: 8px 12px; background: #1f1f1f; border: 1px solid rgba(2, 158, 122, .5); border-radius: 6px; font-size: 12px; color: #ddd; }
-            .txm-fa-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-            .txm-fa-brand { color: #029e7a; font-weight: 700; letter-spacing: 1.5px; white-space: nowrap; }
-            .txm-fa-brand small { color: #8a8a8a; font-weight: 600; letter-spacing: 1px; margin-left: 4px; }
-            .txm-fa-auth-state { color: #8a8a8a; font-size: 11px; margin-left: auto; }
-            .txm-fa-chips { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-            .txm-fa-chip { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #2a2a2a; border: 1px solid #444; border-radius: 4px; font-size: 11px; white-space: nowrap; }
-            .txm-fa-chip b { font-weight: 700; }
-            .txm-fa-chip em { font-style: normal; color: #8a8a8a; }
-            .txm-fa-ico { display: inline-flex; align-items: center; }
-            .txm-fa-ico svg { width: 11px; height: 12px; opacity: .75; }
-            .txm-fa-ico svg, .txm-fa-ico svg path { fill: currentColor; }
-            .txm-fa-chip[data-kind="chain"][data-low="1"] { border-color: #e74c3c; }
-            .txm-fa-chip[data-kind="chain"][data-low="1"] em { color: #e74c3c; }
-            .txm-fa-right { margin-left: auto; display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
-            .txm-fa-escape { background: transparent; border: 1px solid #029e7a; color: #029e7a; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; text-transform: uppercase; }
-            .txm-fa-escape:hover:not(:disabled) { background: #029e7a; color: #fff; }
-            .txm-fa-escape:disabled { opacity: .45; cursor: default; border-color: #444; color: #8a8a8a; }
-            .txm-fa-back { color: #8a8a8a; font-size: 11px; text-decoration: none; white-space: nowrap; }
-            .txm-fa-back:hover { color: #029e7a; }
-            .txm-fa-bar .txm-fastattack { margin: 0; }
-            .txm-fa-bar .txm-fastattack label { display: inline-flex; align-items: center; gap: 4px; color: #8a8a8a; }
-            [data-txm-block] { pointer-events: none !important; opacity: .45 !important; cursor: not-allowed !important; filter: grayscale(1); }
-            .txm-fa-info { border-top: 1px solid #333; padding-top: 6px; font-size: 11px; min-height: 20px; }
-            .txm-fa-info[data-empty="1"] { visibility: hidden; }   /* keeps its space: the page never jumps as rows come and go */
-            .txm-fa-bar > .txm-fa-row:first-child { min-height: 24px; }
-            .txm-fa-bar[data-txm-mode="auth"] .txm-fa-gear { margin-left: auto; }
-            .txm-fa-advice, .txm-fa-limits, .txm-fa-warn { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
-            .txm-fa-limits, .txm-fa-warn { margin-left: auto; }
-            .txm-fa-warn { color: #e74c3c; font-weight: 700; letter-spacing: .3px; }
-            .txm-fa-hold { color: #e0a80d; font-weight: 700; letter-spacing: .3px; margin-left: auto; }
-            .txm-fa-dot { width: 8px; height: 8px; border-radius: 50%; background: #8a8a8a; flex: none; }
-            .txm-fa-adv[data-level="avoid"] .txm-fa-dot { background: #d63b3b; }
-            .txm-fa-adv[data-level="caution"] .txm-fa-dot { background: #e0a80d; }
-            .txm-fa-adv[data-level="ok"] .txm-fa-dot { background: #4caf50; }
-            .txm-fa-age { color: #6f6f6f; font-size: 10px; font-style: italic; white-space: nowrap; }
-            .txm-fa-api { background: transparent; border: 1px solid #029e7a; color: #029e7a; border-radius: 4px; padding: 3px 10px; cursor: pointer; font-size: 11px; font-weight: 700; letter-spacing: 1px; }
-            .txm-fa-api:hover { background: #029e7a; color: #fff; }
-            .txm-fa-api:disabled { opacity: .5; cursor: default; }
-            .txm-fa-gear { background: none; border: none; color: #8a8a8a; font-size: 15px; line-height: 1; padding: 0 4px; cursor: pointer; }
-            .txm-fa-gear:hover { color: #029e7a; }
-            .txm-fa-limits { color: #8a8a8a; }
-            .txm-fa-key { color: #029e7a; font-weight: 700; letter-spacing: 1px; }
-            .txm-fa-sep { color: #444; }
-            .txm-fa-lim { white-space: nowrap; }
-            .txm-fa-lim b { color: #ddd; font-weight: 700; }
-            .txm-fa-mine { margin-left: 14px; display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
-            .txm-fa-val { white-space: nowrap; font-weight: 700; color: #ddd; }
-            .txm-fa-bar .txm-fa-val[data-ok="1"] { color: #2ecc71; }
-            .txm-fa-bar .txm-fa-val[data-ok="0"] { color: #e74c3c; }
-            .txm-fa-bar .txm-fa-val[data-cap="1"] { color: #e0a80d; }
-            .txm-fa-bar .txm-fa-age[data-stale="1"] { color: #e0a80d; }
-            .txm-fa-bar [hidden] { display: none !important; }
-            body:not(.dark-mode) .txm-fa-bar { background: #f2f2f2; color: #333; }
-            body:not(.dark-mode) .txm-fa-chip { background: #fff; border-color: #ccc; }
-            body:not(.dark-mode) .txm-fa-chip em, body:not(.dark-mode) .txm-fa-limits, body:not(.dark-mode) .txm-fa-bar .txm-fastattack label { color: #666; }
-            body:not(.dark-mode) .txm-fa-bar .txm-fastattack select { background: #fff; color: #333; border-color: #ccc; }
-            body:not(.dark-mode) .txm-fa-info { border-top-color: #ddd; }
-            body:not(.dark-mode) .txm-fa-lim b, body:not(.dark-mode) .txm-fa-val { color: #333; }
-            body:not(.dark-mode) .txm-fa-sep { color: #bbb; }
-            body:not(.dark-mode) .txm-fa-escape:disabled { color: #999; border-color: #ccc; }
-            body:not(.dark-mode) .txm-fa-age { color: #888; }
-            .txm-fa-set-overlay { position: fixed; top: 0; right: 0; bottom: 0; left: 0; z-index: 999999; background: rgba(0, 0, 0, .8); -webkit-backdrop-filter: blur(4px); backdrop-filter: blur(4px); display: flex; justify-content: center; align-items: center; }
-            .txm-fa-set-modal { display: flex; flex-direction: column; width: min(520px, 94vw); max-height: min(86vh, 700px); overflow: hidden; background: linear-gradient(180deg, #23252b, #1b1d22); border: 1px solid rgba(2, 158, 122, .5); border-radius: 8px; box-shadow: 0 2px 10px rgba(0, 0, 0, .35); color: #d7d9de; font-size: 12px; }
-            .txm-fa-set-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 14px; background: linear-gradient(180deg, #2c2f37, #23252b); border-bottom: 1px solid #34373f; }
-            .txm-fa-set-head b { color: #029e7a; letter-spacing: 1px; }
-            .txm-fa-set-close { width: 28px; height: 28px; display: inline-flex; align-items: center; justify-content: center; background: none; border: none; color: #8a8a8a; font-size: 22px; line-height: 1; cursor: pointer; }
-            .txm-fa-set-close:hover { color: #fff; }
-            .txm-fa-set-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; padding: 14px; }
-            .txm-fa-set-tabs { display: flex; gap: 6px; margin-bottom: 12px; border-bottom: 1px solid #34373f; padding-bottom: 8px; }
-            .txm-fa-set-tab { border: 1px solid #34373f; border-radius: 5px; background: #15161a; color: #d7d9de; font: inherit; font-weight: 700; min-height: 28px; padding: 5px 12px; cursor: pointer; }
-            .txm-fa-set-tab:hover { border-color: #029e7a; color: #029e7a; }
-            .txm-fa-set-tab.active { background: #029e7a; border-color: #029e7a; color: #10231d; }
-            .txm-fa-set-section { background: #1a1a1a; border: 1px solid #34373f; border-radius: 6px; padding: 12px; margin-bottom: 12px; }
-            .txm-fa-set-title { color: #8a8d96; font-size: 10px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; margin-bottom: 10px; }
-            .txm-fa-set-input { width: 100%; box-sizing: border-box; background: #15161a; color: #d7d9de; border: 1px solid #34373f; border-radius: 5px; padding: 6px 8px; font: inherit; text-align: center; letter-spacing: 2px; margin-bottom: 10px; }
-            .txm-fa-set-input:focus { border-color: #029e7a; outline: none; }
-            .txm-fa-set-input[data-bad="1"] { border-color: #e74c3c; }
-            .txm-fa-set-status { text-align: center; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; font-size: 11px; margin-bottom: 10px; }
-            .txm-fa-set-status[data-state="ok"] { color: #2ecc71; }
-            .txm-fa-set-status[data-state="bad"] { color: #e74c3c; }
-            .txm-fa-set-status[data-state="wait"] { color: #e0a80d; }
-            .txm-fa-set-actions { display: flex; gap: 8px; }
-            .txm-fa-set-actions .txm-fa-api { flex: 1; }
-            .txm-fa-set-check { display: flex; align-items: flex-start; gap: 10px; padding: 8px; background: #15161a; border: 1px solid #34373f; border-radius: 5px; margin-bottom: 8px; cursor: pointer; font-size: 11px; }
-            .txm-fa-set-check:hover { border-color: #029e7a; }
-            .txm-fa-set-check input { margin-top: 2px; }
-            .txm-fa-set-check b { color: #fff; }
-            .txm-fa-set-note { font-size: 10px; color: #8a8d96; }
-            @media (max-width: ${COMPACT_WIDTH}px) {
-                html:not(.html-manual-desktop) .txm-fa-bar { margin: 6px 0; padding: 6px 8px; gap: 4px; }
-                html:not(.html-manual-desktop) .txm-fa-row { gap: 6px; }
-                html:not(.html-manual-desktop) .txm-fa-brand small { display: none; }
-                html:not(.html-manual-desktop) .txm-fa-right, html:not(.html-manual-desktop) .txm-fa-mine { margin-left: 0; }
-                html:not(.html-manual-desktop) .txm-fa-chip { padding: 2px 6px; }
-            }
-            @media (max-width: 560px) {
-                .txm-fa-set-overlay { align-items: flex-start; padding: 8px 0; overflow-y: auto; -webkit-overflow-scrolling: touch; }
-                .txm-fa-set-modal { margin: auto; max-height: 92vh; }
-            }
+            ${CREST_CSS}
         `;
     }
 
@@ -461,6 +644,13 @@
             styleEl = document.getElementById('txm-fa-style') || document.createElement('style');
             styleEl.id = 'txm-fa-style';
             (document.head || document.documentElement).appendChild(styleEl);
+            if (!document.getElementById('txm-fa-font')) {         // the Crest font, once; system-ui stands in until it loads
+                const font = document.createElement('link');
+                font.id = 'txm-fa-font';
+                font.rel = 'stylesheet';
+                font.href = FONT_URL;
+                (document.head || document.documentElement).appendChild(font);
+            }
         }
 
         styleEl.textContent = buildCss();
@@ -616,11 +806,12 @@
         } else setText(el, value);
     }
 
+    // A weapon tile's tag is drawn by CSS from these attributes (Crest tag style); the avoid level reads "Avoid".
     function tagSlot(el, level, tag) {
         if (!el) return;
         if (!level) { delAttr(el, 'data-txm-warn'); delAttr(el, 'data-txm-label'); return; }
         setAttr(el, 'data-txm-warn', level);
-        setAttr(el, 'data-txm-label', tag || '');
+        setAttr(el, 'data-txm-label', level === 'avoid' ? 'Avoid' : String(tag || '').replace(/^./, c => c.toUpperCase()));
     }
 
     // Separate attribute pair (and ::before, not ::after) so a slot can carry
@@ -629,37 +820,30 @@
         if (!el) return;
         if (!on) { delAttr(el, 'data-txm-disarm'); delAttr(el, 'data-txm-disarm-label'); return; }
         setAttr(el, 'data-txm-disarm', '1');
-        setAttr(el, 'data-txm-disarm-label', 'disarm');
+        setAttr(el, 'data-txm-disarm-label', 'Disarm');
     }
 
-    function advChip(row, level, text, desc) {
-        const attrs = { 'data-level': level };
-        if (desc) attrs.title = desc;
-        const s = chip(row, 'txm-fa-chip txm-fa-adv', text, attrs);
-        const dot = document.createElement('i');
-        dot.className = 'txm-fa-dot';
-        s.insertBefore(dot, s.firstChild);
+    // Advice levels differ by marker and icon as well as colour; screen readers hear the level word.
+    const ADVICE_LEVEL = { avoid: ['warn', 'Avoid'], caution: ['info', 'Caution'], ok: ['check', 'Good'], unknown: ['', 'Unknown'] };
+
+    function advChip(c) {
+        const level = ADVICE_LEVEL[c.level] ? c.level : 'unknown';
+        const [ic, word] = ADVICE_LEVEL[level];
+        return `<li class="rra-adv" data-level="${level}"${c.desc ? ` title="${htmlEsc(c.desc)}"` : ''}><span class="rra-diamond" aria-hidden="true"></span>`
+            + (ic ? icon(ic, 12, 'rra-adv__icon') : '')
+            + `<span class="rra-adv__text"><span class="rra-vh">${word}: </span>${htmlEsc(c.text)}${c.desc ? `<span class="rra-vh">. ${htmlEsc(c.desc)}</span>` : ''}</span></li>`;
     }
 
-    function renderAdviceRow(chips) {
+    // known: an answer is in, so an empty list means this target has no bonus notes.
+    function renderAdviceRow(chips, known) {
         const row = q(document, '.txm-fa-bar .txm-fa-advice');
         if (!row) return;                                    // bar not built yet - sig untouched
-        const sig = chips.map(c => `${c.level}|${c.text}|${c.desc || ''}`).join('~');
+        const sig = (known ? 'k:' : '') + chips.map(c => `${c.level}|${c.text}|${c.desc || ''}`).join('~');
         if (sig === adviceSig) return;
         adviceSig = sig;
-        row.textContent = '';
-        chips.forEach(c => advChip(row, c.level, c.text, c.desc));
-        setShown(row, chips.length > 0);
-    }
-
-    // The advice, limits and warn sections share one bar line - the wrapper
-    // row is drawn while any of them has content, and keeps its space while empty.
-    function syncInfoRow() {
-        const bar = q(document, '.txm-fa-bar');
-        if (!bar || bar.getAttribute('data-txm-mode') === 'auth') return;   // its info row is the always-shown status
-        const any = qa(bar, '.txm-fa-advice, .txm-fa-limits, .txm-fa-warn, .txm-fa-hold')
-            .some(el => !el.hasAttribute('hidden'));
-        setAttr(q(bar, '.txm-fa-info'), 'data-empty', any ? '0' : '1');
+        row.innerHTML = chips.length ? chips.map(advChip).join('')
+            : known ? '<li class="rra-adv rra-adv--none">No bonus notes for this target</li>' : '';
+        setShown(row, chips.length > 0 || known);
     }
 
     function renderAdvice() {
@@ -674,10 +858,11 @@
             const tag = tags[id];
             tagSlot(el, tag && tag.level, tag && tag.tag);
             tagDisarm(el, disarm.includes(id));
+            if (id === SLOT_TILE[slot]) setAttr(el, 'data-txm-sel', ''); else delAttr(el, 'data-txm-sel');   // the chosen slot's tile
         });
         def.forEach(el => tagSlot(el, null));
         // Request failures are reported once in the shared warning row.
-        renderAdviceRow(chips);
+        renderAdviceRow(chips, !!advice);
     }
 
     // Top bar
@@ -742,10 +927,12 @@
     // the second event for the same mounted modal.
     function makeBar(mode, html, head, mount) {
         const bar = document.createElement('div');
-        bar.className = 'txm-fa-bar';
+        bar.className = 'txm-fa-bar rra';
         bar.setAttribute('data-txm-mode', mode);
         bar.setAttribute('data-txm-mirror', '0');
-        bar.innerHTML = html;                               // set before insertion: one childList record
+        bar.innerHTML = `<section class="rra-bar${mode === 'auth' ? ' rra-bar--gated' : ''}" aria-label="Attack Advisor">`
+            + `<div class="rra-brand">${skull(30)}<span class="rra-title"><span class="rra-eyebrow">Ruthless Reborn</span><span class="rra-name">Attack Advisor</span></span></div>`
+            + html + '</section>';                          // set before insertion: one childList record
         mount.insertBefore(bar, head || mount.firstChild);
         const gear = q(bar, '.txm-fa-gear');
         const onGear = (e) => { e.preventDefault(); e.stopPropagation(); safe('settings', () => openSettings(gear)); };
@@ -754,57 +941,101 @@
         return bar;
     }
 
+    const settingsButton = () => `<button type="button" class="rra-btn rra-btn--icon rra-settings txm-fa-gear" aria-label="Open settings">${icon('settings', 16)}</button>`;
+
+    // Slot and Outcome pop-up lists: one open at a time; an outside click, Esc or a pick closes it.
+    function setPop(trigger, open) {
+        const pop = document.getElementById(trigger.getAttribute('aria-controls'));
+        if (pop) pop.hidden = !open;
+        trigger.setAttribute('aria-expanded', String(open));
+        const host = trigger.closest('.txm-fa-bar');
+        if (open) setAttr(host, 'data-pop-open', ''); else delAttr(host, 'data-pop-open');
+    }
+
+    function closePops() { qa(document, '.txm-fa-bar .rra-trigger[aria-expanded="true"]').forEach(t => setPop(t, false)); }
+
+    // The pickers are native radios: Slot behind a compact trigger, Outcome a segmented control on desktop and a
+    // pop-up on phone. A pick runs exactly what the old <select>s ran.
     function buildBar(head, mount) {
-        const opts = (names, current) => Object.entries(names)
-            .map(([v, label]) => `<option value="${v}"${Number(v) === current ? ' selected' : ''}>${label}</option>`)
-            .join('');
+        const slots = Object.entries(SLOT_NAMES);
+        const slotRows = slots.map(([v, name]) => `<label class="rra-pop__row" data-slot="${v}"><input type="radio" name="txm-fa-slot" value="${v}"${Number(v) === slot ? ' checked' : ''}>`
+            + `${icon(SLOT_ICON[v], 16, 'rra-pop__icon')}<span class="rra-pop__text"><span class="rra-pop__name"></span><span class="rra-pop__sub">${name}</span></span>${icon('check', 14, 'rra-pop__check')}</label>`).join('');
+        const outRows = Object.entries(ATTACK_NAMES).map(([v, name]) => {
+            const full = ATTACK_FULL[v];
+            const text = full === name ? name : `<span class="rra-outcome__short" aria-hidden="true">${name}</span><span class="rra-outcome__full">${full}</span>`;
+            return `<label class="rra-pop__row rra-outcome__opt"${full === name ? '' : ` title="${full}"`}><input type="radio" name="txm-fa-outcome" value="${v}"${Number(v) === attackType ? ' checked' : ''}>`
+                + `${icon(ATTACK_ICON[v], 14, 'rra-pop__icon')}<span class="rra-pop__text"><span class="rra-pop__name">${text}</span></span>${icon('check', 14, 'rra-pop__check')}</label>`;
+        }).join('');
 
         const bar = makeBar('full', `
-            <div class="txm-fa-row">
-                <span class="txm-fa-brand">RR ATTACK ADVISOR <small>v${VERSION}</small></span>
-
-                <span class="txm-fa-chips">
-                    <span class="txm-fa-chip" data-kind="turns" hidden><i class="txm-fa-ico"></i><b></b></span>
-                    <span class="txm-fa-chip" data-kind="timer" hidden><i class="txm-fa-ico"></i><b></b></span>
-                    <span class="txm-fa-chip" data-kind="chain" hidden><i class="txm-fa-ico"></i><b></b><em></em></span>
-                </span>
-
-                <span class="txm-fa-right">
-                    <a class="txm-fa-back" href="#" hidden></a>
-
-                    <div class="txm-fastattack">
-                        <label>Slot <select id="torn-slot-select">${opts(SLOT_NAMES, slot)}</select></label>
-                        <label>Attack <select id="torn-attack-select">${opts(ATTACK_NAMES, attackType)}</select></label>
-                    </div>
-
-                    <button type="button" class="txm-fa-escape" hidden>Escape</button>
-                    <button type="button" class="txm-fa-gear" title="Settings">&#9881;</button>
-                </span>
+            <dl class="rra-readouts" hidden>
+                <div class="rra-cell" data-kind="status" hidden><dt class="rra-vh">Step</dt><dd class="rra-status">${icon('check', 12)}<span>Ready to start</span></dd></div>
+                <div class="rra-cell" data-kind="turns" hidden><dt class="rra-label">Turns</dt><dd class="rra-value"><b></b><span class="rra-sub"></span></dd></div>
+                <div class="rra-cell" data-kind="timer" hidden><dt class="rra-label">Time left</dt><dd class="rra-value"><b></b></dd></div>
+                <div class="rra-cell" data-kind="chain" hidden><dt class="rra-label">Chain</dt><dd class="rra-value"><b></b><span class="rra-sub"><span class="rra-chaintime"></span>${icon('timer', 12, 'rra-low')}<span class="rra-vh rra-low">, chain timer running low</span></span></dd></div>
+            </dl>
+            <div class="rra-controls">
+                <div class="rra-pick rra-slot" data-cur="${slot}">
+                    <span class="rra-vh" id="txm-fa-slot-label">Slot</span>
+                    <button type="button" class="rra-trigger rra-slot__trigger" aria-controls="txm-fa-slot-pop" aria-expanded="false" aria-labelledby="txm-fa-slot-label txm-fa-slot-value">
+                        <span class="rra-trigger__lead" aria-hidden="true">${slots.map(([v]) => icon(SLOT_ICON[v], 16, 'rra-show rra-show--' + v)).join('')}</span>
+                        <span class="rra-trigger__text"><span class="rra-trigger__over" aria-hidden="true">${slots.map(([v, name]) => `<span class="rra-show rra-show--${v}">${name}</span>`).join('')}</span><span class="rra-trigger__value" id="txm-fa-slot-value"></span></span>
+                        ${icon('chevron', 14, 'rra-trigger__chev')}
+                    </button>
+                    <div class="rra-pop rra-slot__list" id="txm-fa-slot-pop" role="radiogroup" aria-labelledby="txm-fa-slot-label" hidden>${slotRows}</div>
+                </div>
+                <div class="rra-pick rra-outcome">
+                    <span class="rra-vh" id="txm-fa-outcome-label">Outcome</span>
+                    <button type="button" class="rra-trigger rra-outcome__trigger" aria-controls="txm-fa-outcome-pop" aria-expanded="false" aria-labelledby="txm-fa-outcome-label txm-fa-outcome-value">
+                        <span class="rra-trigger__text"><span class="rra-trigger__over" aria-hidden="true">Outcome</span><span class="rra-trigger__value" id="txm-fa-outcome-value">${ATTACK_NAMES[attackType]}</span></span>
+                        ${icon('chevron', 14, 'rra-trigger__chev')}
+                    </button>
+                    <div class="rra-pop rra-outcome__list" id="txm-fa-outcome-pop" role="radiogroup" aria-labelledby="txm-fa-outcome-label" hidden>${outRows}</div>
+                </div>
+                <button type="button" class="rra-btn rra-btn--primary rra-escape" disabled>${icon('escape', 14)}<span>Escape</span></button>
+                ${settingsButton()}
             </div>
-
-            <div class="txm-fa-row txm-fa-info" data-empty="1">
-                <div class="txm-fa-advice" hidden></div>
-                <div class="txm-fa-limits" hidden></div>
-                <div class="txm-fa-warn" hidden></div>
-                <div class="txm-fa-hold" hidden></div>
+            <div class="rra-band">
+                <div class="rra-banner txm-fa-hold" hidden><span class="rra-banner__icon"></span><p class="rra-banner__msg" role="status"></p></div>
+                <div class="rra-row">
+                    <div class="rra-nav" hidden><a class="rra-back" href="#">${icon('back', 14)}<span></span></a></div>
+                    <ul class="rra-advice-list txm-fa-advice" aria-label="Bonus advice" hidden></ul>
+                    <p class="rra-notice txm-fa-warn" hidden>${icon('warn', 12)}<span></span></p>
+                    <p class="rra-limits txm-fa-limits" hidden></p>
+                </div>
             </div>
         `, head, mount);
 
-        q(bar, '#torn-slot-select').addEventListener('change', e => {
-            slot = Number(e.target.value) || SLOT.MELEE;
-            storeSet(STORAGE_SLOT, String(slot));
-            refreshStyle();
+        bar.addEventListener('click', e => {
+            const trigger = e.target.closest && e.target.closest('.rra-trigger');
+            if (!trigger) return;
+            const open = trigger.getAttribute('aria-expanded') !== 'true';
+            closePops();
+            if (!open) return;
+            setPop(trigger, true);
+            const pop = document.getElementById(trigger.getAttribute('aria-controls'));
+            const first = q(pop, 'input:checked') || q(pop, 'input');
+            if (first) first.focus({ preventScroll: true });
         });
 
-        q(bar, '#torn-attack-select').addEventListener('change', e => {
-            attackType = Number(e.target.value) || ATTACK.MUG;
-            storeSet(STORAGE_TYPE, String(attackType));
-            schedule();
+        bar.addEventListener('change', e => {
+            const r = e.target;
+            if (r.name === 'txm-fa-slot') {
+                slot = Number(r.value) || SLOT.MELEE;
+                storeSet(STORAGE_SLOT, String(slot));
+                refreshStyle();
+            } else if (r.name === 'txm-fa-outcome') {
+                attackType = Number(r.value) || ATTACK.MUG;
+                storeSet(STORAGE_TYPE, String(attackType));
+            } else return;
+            const trigger = q(r.closest('.rra-pick'), '.rra-trigger');
+            if (trigger && trigger.getAttribute('aria-expanded') === 'true') { setPop(trigger, false); trigger.focus({ preventScroll: true }); }
+            schedule();                                      // repaints the triggers, the chosen tile and the outcome filter
         });
 
         // Proxy, never move: reparenting a React-managed node breaks its unmount
         // and takes the whole attack app down. Resolved at click time.
-        q(bar, '.txm-fa-escape').addEventListener('click', () => {
+        q(bar, '.rra-escape').addEventListener('click', () => {
             const btn = q(document, `${sel('appHeaderWrapper')} button[aria-label="escape"]`);
             if (btn && !btn.disabled) btn.click();
         });
@@ -815,24 +1046,38 @@
         return bar;
     }
 
+    const GATE_ICON = { nokey: 'key', denied: 'lock', verifying: 'timer', unavailable: 'warn' };
+
+    function authState() {
+        if (!validKey(apiKey())) return 'nokey';
+        if (Session.state === 'denied') return 'denied';
+        return Session.nextTryAt > nowMs() ? 'unavailable' : 'verifying';
+    }
+
     function authStatusText() {
-        if (!validKey(apiKey())) return 'API key required';
-        if (Session.state === 'denied') return 'Access restricted';
+        const state = authState();
+        if (state === 'nokey') return 'Add your Torn API key to start';
+        if (state === 'denied') return 'Access restricted to Ruthless Reborn members';
         const hold = Hold.state === 'warn' ? notEnforcedText() : Hold.state === 'hold' ? HOLD_TEXT
             : Hold.remembered ? 'Start Fight blocked: ' + Hold.remembered : '';
-        return (Session.nextTryAt > nowMs() ? 'Authorization unavailable' : 'Verifying access…') + (hold ? ' · ' + hold : '');
+        return (state === 'unavailable' ? 'Authorization unavailable' : 'Verifying access…') + (hold ? ' · ' + hold : '');
     }
 
     function buildAuthBar(head, mount) {
-        const bar = makeBar('auth', `
-            <div class="txm-fa-row">
-                <span class="txm-fa-brand">RR ATTACK ADVISOR <small>v${VERSION}</small></span>
-                <button type="button" class="txm-fa-gear" title="Settings">&#9881;</button>
-            </div>
-            <div class="txm-fa-row txm-fa-info"><span class="txm-fa-auth-state"></span></div>
-        `, head, mount);
-        setText(q(bar, '.txm-fa-auth-state'), authStatusText());
+        const bar = makeBar('auth', `<div class="rra-controls">${settingsButton()}</div>`
+            + '<div class="rra-band"><p class="rra-gate" role="status"><span class="rra-gate__icon"></span><span class="txm-fa-auth-state"></span></p></div>', head, mount);
+        renderAuthState(bar);
         return bar;
+    }
+
+    // The gated bar's icon and message, redrawn every second, so written only on change.
+    function renderAuthState(bar) {
+        const state = authState(), shell = q(bar, '.rra-bar');
+        if (shell && shell.getAttribute('data-access') !== state) {
+            shell.setAttribute('data-access', state);
+            q(shell, '.rra-gate__icon').innerHTML = icon(GATE_ICON[state], 16);
+        }
+        setText(q(bar, '.txm-fa-auth-state'), authStatusText());
     }
 
     function renderTopBar() {
@@ -853,7 +1098,7 @@
         }
 
         if (Session.pass()) updateBar(bar);
-        else setText(q(bar, '.txm-fa-auth-state'), authStatusText());
+        else renderAuthState(bar);
         holdBarSpace(bar, head);
     }
 
@@ -862,7 +1107,8 @@
     // verifying bar is padded to match, so the page does not jump down once access is confirmed.
     // shortcut: the remembered height is the last attack page's, so a first-ever visit or a wrap change can still move it slightly.
     function holdBarSpace(bar, head) {
-        const headH = head && head.isConnected ? head.offsetHeight : 0;
+        const cs = head && head.isConnected ? getComputedStyle(head) : null;   // Torn's header margin counts too
+        const headH = cs ? head.offsetHeight + parseFloat(cs.marginTop) + parseFloat(cs.marginBottom) : 0;
         if (bar.getAttribute('data-txm-mode') === 'full') {
             const total = String(bar.offsetHeight + headH);
             if (total !== '0' && storeGet(STORAGE_BAR_HEIGHT) !== total) storeSet(STORAGE_BAR_HEIGHT, total);
@@ -871,6 +1117,15 @@
         const want = Math.max(0, Number(storeGet(STORAGE_BAR_HEIGHT)) - headH);
         const css = want ? want + 'px' : '';
         if (bar.style.minHeight !== css) bar.style.minHeight = css;
+    }
+
+    // Own weapon names by slot, '' where Torn shows the slot empty.
+    function slotWeapons() {
+        const { own } = weaponSlotBuckets();
+        return Object.keys(SLOT_NAMES).map(v => {
+            const el = own[SLOT_TILE[v]];
+            return el && !el.matches(sel('emptySlot')) ? weaponName(el) || '' : '';
+        });
     }
 
     function updateBar(bar) {
@@ -882,50 +1137,62 @@
         // Against a ranked-war opponent the back link retargets to the enemy
         // faction; in the signature so the link repaints when it changes.
         const tgt = warTarget();
+        const weapons = slotWeapons();
+        // "Ready to start" fills the empty readout place while Start Fight is on screen and nothing holds it.
+        const ready = !!h && !h.turns && !h.timer && !Hold.state && !Hold.unlocked
+            && buttonLabels(qa(document, `${sel('dialogButtons')} button`)).some(t => START_LABELS.includes(t));
 
-        const sig = h
-            ? [h.turns, h.timer, h.count, h.time, h.low ? 1 : 0,
-               h.escape ? (h.escape.disabled ? 'd' : 'e') : '-',
-               h.backHref, h.mirror ? 1 : 0, tgt ? tgt.oppId : '',
-               ['turns', 'timer', 'chain'].map(k => h.icons[k] ? 1 : 0).join('')].join('|')
-            : 'none';
+        const sig = JSON.stringify([h && [h.turns, h.timer, h.count, h.time, h.low, h.escape ? h.escape.disabled : null, h.backHref, h.backText, h.mirror],
+            tgt ? tgt.oppId : '', weapons, slot, attackType, ready]);
         if (sig === barSig) return;                          // hot path: zero DOM writes
         barSig = sig;
 
         setAttr(bar, 'data-txm-mirror', h && h.mirror ? '1' : '0');
 
-        const chipEl = (kind) => q(bar, `.txm-fa-chip[data-kind="${kind}"]`);
-        const fill = (kind, value) => {
-            const c = chipEl(kind);
+        // Readout cells show only with a value. The timers tick every second - setLiveText keeps
+        // those writes off the observer (characterData, not childList).
+        const cell = kind => q(bar, `.rra-cell[data-kind="${kind}"]`);
+        const fill = (kind, value, sub) => {
+            const c = cell(kind);
             setShown(c, !!value);
             if (!value) return;
-            // The timer ticks every second - setLiveText keeps that write off
-            // the observer (characterData, not childList).
             setLiveText(q(c, 'b'), value);
-
-            // Clone Torn's own icon exactly once; CSS repaints it currentColor.
-            const ico = q(c, '.txm-fa-ico');
-            const src = h.icons[kind];
-            if (ico && !ico.firstChild && src) ico.appendChild(src.cloneNode(true));
+            if (sub != null) setLiveText(q(c, kind === 'chain' ? '.rra-chaintime' : '.rra-sub'), sub);
         };
-
-        fill('turns', h ? h.turns : '');
+        const turns = h && /^(\d+)\s*\/\s*(\d+)$/.exec(h.turns);       // "3/25" reads "3 of 25"
+        fill('turns', h ? (turns ? turns[1] : h.turns) : '', turns ? 'of ' + turns[2] : '');
         fill('timer', h ? h.timer : '');
-        fill('chain', h ? h.count : '');
+        fill('chain', h ? h.count : '', h ? h.time : '');
+        setAttr(cell('chain'), 'data-low', h && h.low ? '1' : '0');
+        setShown(cell('status'), ready);
+        const shown = qa(bar, '.rra-cell').some(c => !c.hasAttribute('hidden'));
+        setShown(q(bar, '.rra-readouts'), shown);
+        setAttr(q(bar, '.rra-bar'), 'data-readouts', shown ? 'some' : 'none');
 
-        const ch = chipEl('chain');
-        setLiveText(q(ch, 'em'), h && h.time ? `(${h.time})` : '');
-        setAttr(ch, 'data-low', h && h.low ? '1' : '0');
+        const escape = q(bar, '.rra-escape'), off = !(h && h.escape) || h.escape.disabled;
+        if (escape.disabled !== off) escape.disabled = off;
 
-        const esc = q(bar, '.txm-fa-escape');
-        setShown(esc, !!(h && h.escape));
-        if (h && h.escape && esc.disabled !== h.escape.disabled) esc.disabled = h.escape.disabled;
-
-        const back = q(bar, '.txm-fa-back');
-        setShown(back, !!(h && h.backHref));
+        const back = q(bar, '.rra-back');
+        setShown(q(bar, '.rra-nav'), !!(h && h.backHref));
         if (h && h.backHref) {
-            if (tgt) { setAttr(back, 'href', FACTION_URL(tgt.oppId)); setText(back, 'Back to faction'); } else { setAttr(back, 'href', h.backHref); setText(back, h.backText); }
+            if (tgt) { setAttr(back, 'href', FACTION_URL(tgt.oppId)); setText(q(back, 'span'), 'Back to faction'); } else { setAttr(back, 'href', h.backHref); setText(q(back, 'span'), h.backText); }
         }
+
+        // The pickers follow the script's own slot and outcome, with the real weapon names.
+        const slotBox = q(bar, '.rra-slot');
+        qa(slotBox, '.rra-pop__row').forEach(row => {
+            const v = Number(row.getAttribute('data-slot')), name = weapons[v - 1];
+            setText(q(row, '.rra-pop__name'), name || 'No weapon');
+            setAttr(row, 'data-empty', name ? '0' : '1');
+            const input = q(row, 'input');
+            if (input.checked !== (v === slot)) input.checked = v === slot;
+        });
+        setAttr(slotBox, 'data-cur', String(slot));
+        setAttr(slotBox, 'data-empty', weapons[slot - 1] ? '0' : '1');
+        setText(q(slotBox, '.rra-trigger__value'), weapons[slot - 1] || 'No weapon');
+        const outBox = q(bar, '.rra-outcome');
+        qa(outBox, 'input').forEach(input => { const on = Number(input.value) === attackType; if (input.checked !== on) input.checked = on; });
+        setText(q(outBox, '.rra-trigger__value'), ATTACK_NAMES[attackType]);
     }
 
     // War data comes from Torn with the member's own key, so war targets are known even while the RR
@@ -1451,7 +1718,7 @@
     // Members with no key, denied members and installs with no sign of faction membership (no session and
     // no saved war data) keep Torn's controls.
     const Hold = { state: '', cause: '', unlocked: false, context: '', since: 0, failure: '', remembered: '' };
-    const HOLD_TEXT = 'Checking war limits… Start Fight paused';
+    const HOLD_TEXT = 'Checking war limits. Start Fight is paused.';
     const UNKNOWN_CAUSE = {
         'limits-other-war': 'Limits not set for this war yet',
         'hits-stale': 'ZZCraft has no hits for this war yet',
@@ -1854,72 +2121,94 @@
         } finally { stepEnd('ZZCraft'); if (gen === Limits.gen) { Limits.inFlight = false; schedule(); } }
     }
 
-    function chip(row, cls, text, attrs) {
-        const s = document.createElement('span');
-        s.className = cls;
-        s.textContent = text;
-        if (attrs) Object.keys(attrs).forEach(k => s.setAttribute(k, attrs[k]));
-        row.appendChild(s);
-        return s;
+    // War limits in Crest form. Every figure is the RR server's own (view.parts and view.stats, the old LIMITS
+    // row): "N of M hits left" leads, M being the cap's maximum ("Number of Hits") and N that less MY HITS;
+    // respect and any other figure follow quietly, then ZZCraft's data age.
+    function limitsHtml(view) {
+        const parts = new Map(view.parts), stats = new Map(view.stats.map(s => [s.label, s]));
+        const mine = stats.get('MY HITS'), used = mine && /^\d+$/.test(mine.value) ? Number(mine.value) : null;
+        const range = parts.get('Number of Hits') || '', noHits = parts.get('') === 'No hits allowed';
+        let m, min = null, max = null;                      // the server writes the range as "1-3", "≥1" or "≤3"
+        if ((m = /^(\d+)-(\d+)$/.exec(range))) { min = Number(m[1]); max = Number(m[2]); }
+        else if ((m = /^≥(\d+)$/.exec(range))) min = Number(m[1]);
+        else if ((m = /^≤(\d+)$/.exec(range))) max = Number(m[1]);
+        const b = (value, ok) => `<b${ok ? ` data-ok="${htmlEsc(ok)}"` : ''}>${htmlEsc(value)}</b>`;
+        const group = html => `<span class="rra-lim">${html}</span>`;
+        const word = label => label === 'UNAUTHORIZED' ? 'Unauthorized hits' : label.charAt(0).toUpperCase() + label.slice(1).toLowerCase();
+        const out = [];
+        if (noHits) out.push(`<span class="rra-left rra-left--none">${icon('lock', 12)}<span><span class="rra-vh">War limits: </span>No hits allowed</span></span>`);
+        else if (max !== null && used !== null) {
+            const left = Math.max(0, max - used);
+            out.push(`<span class="rra-left${left ? '' : ' rra-left--none'}">${icon(left ? 'check' : 'lock', 12)}<span><span class="rra-vh">War limits: </span><b>${left}</b> of <b>${max}</b> ${max === 1 ? 'hit' : 'hits'} left</span></span>`);
+        } else if (max !== null) out.push(`<span class="rra-left rra-left--quiet"><span><span class="rra-vh">War limits: </span><b>?</b> of <b>${max}</b> hits used</span></span>`);
+        else if (!view.parts.length) out.push('<span class="rra-left rra-left--quiet">No war limits set</span>');
+        if (min !== null) out.push(group(`Min hits ${b(min, used !== null && used < min ? '0' : '')}`));
+        if (mine && (noHits || max === null)) out.push(group(`Your hits ${b(mine.value, mine.ok)}`));
+        const avg = stats.get('AVG RESPECT'), goal = parts.get('Average Respect');
+        if (avg || goal) out.push(group((avg ? `Respect ${b(avg.value, avg.ok)}${goal ? ', min ' : ''}` : 'Min respect ') + (goal ? b(goal.replace(/^≥/, '')) : '')));
+        const done = ['Number of Hits', 'Average Respect', '', 'MY HITS', 'AVG RESPECT'];
+        view.parts.forEach(([label, value]) => { if (!done.includes(label)) out.push(group(`${htmlEsc(word(label))} ${b(value)}`)); });
+        view.stats.forEach(s => { if (!done.includes(s.label)) out.push(group(`${htmlEsc(word(s.label))} ${b(s.value, s.ok)}`)); });
+        return out.join('') + '<span class="rra-age txm-fa-age"></span>';
     }
 
+    // The banner wording while Start Fight is blocked: the agreed cap message, else the server's reason.
+    function blockedText(reason, pendingText) {
+        if (Hold.state === 'pending') return pendingText || 'The war has not started yet. Start Fight has been disabled until then.';
+        const cap = /^At hit cap \d+\/(\d+)/.exec(reason || '');
+        if (cap) return `War limit reached: you have used all ${cap[1]} hit${cap[1] === '1' ? '' : 's'}. Start Fight is blocked.`;
+        return (reason ? reason + '. ' : 'War limit reached. ') + 'Start Fight is blocked.';
+    }
+
+    // Row 2 follows Start Fight: a gold banner while it is paused, red while it is blocked, orange while the
+    // limits cannot be enforced. The old warning row's other messages stay as a quiet notice in the band.
     function renderLimits() {
         guardStartFight();                                  // first, and whether or not the bar is drawn
         const bar = q(document, '.txm-fa-bar');
         if (!bar) return;
         const hold = Hold.unlocked ? 'Start Fight could not be found to pause it. Do not attack until the war limits show.' : Hold.state === 'hold' ? HOLD_TEXT : '';
-        setShown(q(bar, '.txm-fa-hold'), !!hold); setLiveText(q(bar, '.txm-fa-hold'), hold);
-        const row = q(bar, '.txm-fa-limits'), warnRow = q(bar, '.txm-fa-warn');
+        const row = q(bar, '.txm-fa-limits'), notice = q(bar, '.txm-fa-warn'), banner = q(bar, '.txm-fa-hold');
         const result = Analysis.display('limits');
         const view = result && result.limits;
         const unavailable = !!(view && view.visible && !Limits.payload);
         const analysisFailed = Analysis.nextTryAt > 0 || (!!Analysis.rejected && Analysis.rejected === Analysis.observed);
         const tornNote = War.failedAt ? tornFailure() + ': war status may be out of date' : '';
         const signature = JSON.stringify([view, unavailable, Limits.failed, Limits.inFlight, analysisFailed, hold, Hold.state, Hold.cause, Hold.remembered, tornNote]);
-        if (signature !== limitsSig) {
+        if (row && signature !== limitsSig) {
             limitsSig = signature;
-            setShown(row, !!(view && view.visible && !unavailable));
-            if (view && view.visible && !unavailable) {
-                const layout = JSON.stringify([view.parts.map(p => p[0]), view.stats.map(s => s.label)]);
-                if (row.getAttribute('data-txm-layout') !== layout || !row.children.length) {
-                    row.textContent = '';
-                    setAttr(row, 'data-txm-layout', layout);
-                    chip(row, 'txm-fa-key', 'LIMITS');
-                    if (!view.parts.length) chip(row, 'txm-fa-lim', 'none set');
-                    view.parts.forEach(([label, value], i) => {
-                        if (i) chip(row, 'txm-fa-sep', '·');
-                        const part = chip(row, 'txm-fa-lim', label ? label + ' ' : '');
-                        const bold = document.createElement('b'); bold.textContent = value; part.appendChild(bold);
-                    });
-                    const mine = document.createElement('span'); mine.className = 'txm-fa-mine'; row.appendChild(mine);
-                    view.stats.forEach((stat, i) => {
-                        if (i) chip(mine, 'txm-fa-sep', '·');
-                        chip(mine, 'txm-fa-key', stat.label);
-                        const attrs = {}; if (stat.ok) attrs['data-ok'] = stat.ok; if (stat.cap) attrs['data-cap'] = '1';
-                        chip(mine, 'txm-fa-val', stat.value, attrs);
-                    });
-                    chip(mine, 'txm-fa-age', '');
-                } else {
-                    qa(row, '.txm-fa-lim b').forEach((node, i) => setLiveText(node, view.parts[i][1]));
-                    qa(row, '.txm-fa-val').forEach((node, i) => {
-                        const stat = view.stats[i];
-                        setLiveText(node, stat.value);
-                        if (stat.ok) setAttr(node, 'data-ok', stat.ok); else delAttr(node, 'data-ok');
-                        if (stat.cap) setAttr(node, 'data-cap', '1'); else delAttr(node, 'data-cap');
-                    });
-                }
+            const shown = !!(view && view.visible && !unavailable);
+            setShown(row, shown);
+            if (shown) {
+                const html = limitsHtml(view);
+                if (row.__txmHtml !== html) { row.__txmHtml = html; row.innerHTML = html; }
             }
-            let warning = '';
-            if (Hold.state === 'warn') warning = notEnforcedText();
-            else if (!result && Hold.remembered) warning = 'Warning: ' + Hold.remembered;
-            else if (!result) warning = analysisFailed ? 'Advice and war checks unavailable' : '';
-            else if (view.pending) warning = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.';
+            // The same warnings, in the same order, as before; "covered" marks the ones a banner already says.
+            let main = '', covered = '';
+            if (Hold.state === 'warn') { main = notEnforcedText(); covered = 'warn'; }
+            else if (!result && Hold.remembered) { main = 'Warning: ' + Hold.remembered; covered = 'blocked'; }
+            else if (!result) main = analysisFailed ? 'Advice and war checks unavailable' : '';
+            else if (view.pending) { main = 'The war' + (result.war.oppName ? ' with ' + result.war.oppName : '') + ' starts on ' + warStartText() + '. Start Fight has been disabled until then.'; covered = 'blocked'; }
             // No figure to show: say so once a fetch has failed, not while the first one is still running.
-            else if (unavailable) warning = Limits.failed && !Limits.inFlight ? 'War limits unavailable. Retrying…' : '';
-            else if (view.reason) warning = 'Warning: ' + view.reason;
+            else if (unavailable) main = Limits.failed && !Limits.inFlight ? 'War limits unavailable. Retrying…' : '';
+            else if (view.reason) { main = 'Warning: ' + view.reason; covered = 'blocked'; }
             // A failed Torn lookup is never silent, even while a known block holds or the target is allowed.
-            if (tornNote && !(Hold.state === 'warn' && Hold.cause.startsWith('Torn'))) warning = warning ? warning + ' · ' + tornNote : tornNote;
-            setShown(warnRow, !!warning); setLiveText(warnRow, warning);
+            const torn = tornNote && !(Hold.state === 'warn' && Hold.cause.startsWith('Torn')) ? tornNote : '';
+            const kind = hold ? 'hold' : Hold.state === 'warn' ? 'warn' : Hold.state === 'limit' || Hold.state === 'pending' ? 'blocked' : '';
+            const message = kind === 'hold' ? hold : kind === 'warn' ? main
+                : kind === 'blocked' ? blockedText((view && view.reason) || Hold.remembered, view && view.pending ? main : '') : '';
+            const quiet = [covered === kind ? '' : main, torn].filter(Boolean).join(' · ');
+            setShown(banner, !!kind);
+            if (kind && banner.getAttribute('data-kind') !== kind) {
+                banner.setAttribute('data-kind', kind);
+                q(banner, '.rra-banner__icon').innerHTML = icon(kind === 'hold' ? 'timer' : kind === 'warn' ? 'warn' : 'lock', 16);
+                q(banner, '.rra-banner__msg').setAttribute('role', kind === 'hold' ? 'status' : 'alert');
+            }
+            if (kind) setLiveText(q(banner, '.rra-banner__msg'), message);
+            const band = q(bar, '.rra-band');
+            if (kind) setAttr(band, 'data-alert', kind); else delAttr(band, 'data-alert');
+            const home = kind ? banner : q(bar, '.rra-row');   // the limits sit in the banner while it shows
+            if (home && row.parentNode !== home) home.appendChild(row);
+            setShown(notice, !!quiet); setLiveText(q(notice, 'span'), quiet);
         }
         const age = q(row, '.txm-fa-age');
         // ZZCraft's own data age (RR-13), amber once the figure is overdue or the last fetch failed.
@@ -1959,80 +2248,72 @@
         if (trigger && trigger.isConnected) trigger.focus();
     }
 
+    // The right-side panel: Access, the four switches, the version and the key notes. Controls only.
     function openSettings(trigger) {
         const existing = document.getElementById('txm-fa-settings');
         if (existing) { q(existing, '.txm-fa-set-input')?.focus(); return; }
         settingsTrigger = trigger || document.activeElement;
+        closePops();
 
         const FEATURES = [
-            ['advisor', 'Bonus advisor', 'Enemy bonus chips, weapon slot tags and the temporary-weapon verdict'],
-            ['buttons', 'Move attack buttons', 'On desktop layouts, reposition Start Fight / outcome buttons beside your weapons and hide the emptied dialog frame'],
-            ['outcome', 'Outcome filter', 'Hide the outcome buttons you have not selected in the Attack dropdown'],
-            ['loglinks', 'Log profile links', "Link the defender's name in the fight log to their profile"]
+            ['advisor', 'Bonus advisor'],
+            ['buttons', 'Move attack buttons'],
+            ['outcome', 'Outcome filter'],
+            ['loglinks', 'Log profile links']
+        ];
+        const KEY_NOTES = [
+            ['Storage', 'Your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.'],
+            ['Sharing', "Sent to the RR server (to confirm you're in the faction), to ZZCraft (to log in for war limits), and to Torn's official API (war and roster lookups)."],
+            ['Purpose', 'Ruthless Reborn faction war tooling: attack advice and war hit limits.'],
+            ['Key storage', "Your userscript manager's storage, or TornPDA's storage."],
+            ['Access level', 'Public Access key only.']
         ];
 
         const overlay = document.createElement('div');
         overlay.id = 'txm-fa-settings';
-        overlay.className = 'txm-fa-set-overlay';
-
-        const modal = document.createElement('div');
-        modal.className = 'txm-fa-set-modal';
-        modal.setAttribute('role', 'dialog');
-        modal.setAttribute('aria-modal', 'true');
-        modal.setAttribute('aria-labelledby', 'txm-fa-settings-title');
-        modal.innerHTML = `
-            <div class="txm-fa-set-head">
-            <b id="txm-fa-settings-title">RR ATTACK ADVISOR</b>
-            <button type="button" class="txm-fa-set-close" aria-label="Close settings">&times;</button>
-            </div>
-            <div class="txm-fa-set-body">
-                <div class="txm-fa-set-tabs">
-                    <button type="button" class="txm-fa-set-tab active" data-tab="api">API</button>
-                    <button type="button" class="txm-fa-set-tab" data-tab="features">Features</button>
-                </div>
-
-                <div data-pane="api">
-                    <div class="txm-fa-set-section">
-                        <div class="txm-fa-set-title">Torn API key (Public Access)</div>
-                        <input type="password" class="txm-fa-set-input" placeholder="Paste your API key"
-                               autocomplete="off" spellcheck="false"
-                               title="16 or 50 alphanumeric characters">
-                        <div class="txm-fa-set-status">No API key set</div>
-                        <div class="txm-fa-set-actions">
-                            <button type="button" class="txm-fa-api" data-act="save">Save</button>
-                            <button type="button" class="txm-fa-api" data-act="remove">Remove</button>
+        overlay.className = 'rra rra-overlay';
+        overlay.innerHTML = `
+            <section class="rra-panel" role="dialog" aria-modal="true" aria-labelledby="txm-fa-settings-title">
+                <header class="rra-panel__head">
+                    <div class="rra-panel__crest">${skull(32)}<span class="rra-panel__titles"><span class="rra-panel__eyebrow">Ruthless Reborn</span><h2 class="rra-panel__title" id="txm-fa-settings-title">Attack Advisor settings</h2></span></div>
+                    <button type="button" class="rra-btn rra-btn--icon txm-fa-set-close" aria-label="Close settings">${icon('close', 16)}</button>
+                </header>
+                <div class="rra-panel__body">
+                    <section class="rra-panel__section" aria-labelledby="txm-fa-set-access">
+                        <h3 class="rra-panel__heading" id="txm-fa-set-access">Access</h3>
+                        <div class="rra-key">
+                            <p class="rra-key__status txm-fa-set-status" id="txm-fa-set-status" role="status">No API key set</p>
+                            <label class="rra-key__label" for="txm-fa-set-key">Torn API key</label>
+                            <input type="password" class="rra-key__input txm-fa-set-input" id="txm-fa-set-key" placeholder="Public Access key"
+                                   autocomplete="off" spellcheck="false" aria-describedby="txm-fa-set-status"
+                                   title="16 or 50 alphanumeric characters">
+                            <div class="rra-key__actions">
+                                <button type="button" class="rra-btn rra-btn--primary" data-act="save">${icon('check', 14)}Save key</button>
+                                <button type="button" class="rra-btn rra-btn--ghost" data-act="remove">Remove key</button>
+                            </div>
                         </div>
-                    </div>
-                    <div class="txm-fa-set-section">
-                        <div class="txm-fa-set-title">How your API key is used</div>
-                        <div class="txm-fa-set-note"><b>Storage:</b> your key stays on this device. The RR server keeps only a one-way fingerprint of it, for at most 4 minutes, and never stores or logs the key itself.</div>
-                        <div class="txm-fa-set-note"><b>Sharing:</b> sent to the RR server (to confirm you're in the faction), to ZZCraft (to log in for war limits), and to Torn's official API (war and roster lookups).</div>
-                        <div class="txm-fa-set-note"><b>Purpose:</b> Ruthless Reborn faction war tooling: attack advice and war hit limits.</div>
-                        <div class="txm-fa-set-note"><b>Key storage:</b> your userscript manager's storage, or TornPDA's storage.</div>
-                        <div class="txm-fa-set-note"><b>Access level:</b> Public Access key only.</div>
-                    </div>
+                    </section>
+                    <section class="rra-panel__section" aria-labelledby="txm-fa-set-features">
+                        <h3 class="rra-panel__heading" id="txm-fa-set-features">Attack Advisor</h3>
+                        <ul class="rra-settings">${FEATURES.map(([k, name]) => `
+                            <li class="rra-setting"><label class="rra-setting__name" for="txm-fa-set-${k}">${name}</label><button type="button" class="rra-switch" id="txm-fa-set-${k}" role="switch" aria-checked="false" data-setting="${k}"><span aria-hidden="true"></span></button></li>`).join('')}
+                        </ul>
+                    </section>
+                    <p class="rra-panel__section rra-panel__version"><span>Attack Advisor</span><span class="rra-chip">v${VERSION}</span></p>
+                    <details class="rra-panel__section rra-keyuse">
+                        <summary class="rra-keyuse__summary">${icon('key', 16)}<span>How your API key is used</span>${icon('chevron', 16, 'rra-keyuse__chevron')}</summary>
+                        <dl class="rra-keyuse__notes">${KEY_NOTES.map(([term, text]) => `<div class="rra-keyuse__note"><dt class="rra-keyuse__term">${term}</dt><dd class="rra-keyuse__text">${htmlEsc(text)}</dd></div>`).join('')}</dl>
+                    </details>
                 </div>
-
-                <div data-pane="features" hidden>
-                    <div class="txm-fa-set-section">
-                        <div class="txm-fa-set-title">Features</div>
-                        ${FEATURES.map(([k, name, desc]) => `
-                        <label class="txm-fa-set-check">
-                            <input type="checkbox" data-setting="${k}">
-                            <span><b>${name}</b> - ${desc}</span>
-                        </label>`).join('')}
-                        <div class="txm-fa-set-note">War limits &amp; Start Fight blocking are always active - they are a faction requirement and cannot be disabled.</div>
-                    </div>
-                </div>
-            </div>
+            </section>
         `;
 
-        const input = q(modal, '.txm-fa-set-input');
+        const input = q(overlay, '.txm-fa-set-input');
         input.value = apiKey();                             // property write - never interpolated into HTML
 
-        const status = q(modal, '.txm-fa-set-status');
+        const status = q(overlay, '.txm-fa-set-status');
         const setStatus = (text, state) => { status.textContent = text; setAttr(status, 'data-state', state || ''); };
-        if (validKey(apiKey())) setStatus('✓ API key configured', 'ok');
+        if (validKey(apiKey())) setStatus(Session.pass() ? 'Valid and authorised' : Session.state === 'denied' ? 'Access restricted to Ruthless Reborn members' : 'API key configured', Session.state === 'denied' ? 'bad' : 'ok');
 
         input.addEventListener('input', () => delAttr(input, 'data-bad'));
 
@@ -2041,16 +2322,17 @@
             const v = input.value.trim();
             if (v && !validKey(v)) {                         // reject typos before transmitting anything
                 setAttr(input, 'data-bad', '1');
-                setStatus('✗ Keys are 16 or 50 alphanumeric characters', 'bad');
+                setStatus('Keys are 16 or 50 alphanumeric characters', 'bad');
                 return;
             }
             delAttr(input, 'data-bad');
             setStatus('Saving…', 'wait');
-            try { await applyApiKey(v); setStatus(v ? '✓ Key saved' : 'No API key set', v ? 'ok' : ''); } catch (e) { setAttr(input, 'data-bad', '1'); setStatus('✗ Protected storage unavailable', 'bad'); }
+            try { await applyApiKey(v); setStatus(v ? 'Key saved' : 'No API key set', v ? 'ok' : ''); } catch (e) { setAttr(input, 'data-bad', '1'); setStatus('Protected storage unavailable', 'bad'); }
         };
 
-        modal.addEventListener('click', (e) => {
-            const act = e.target.getAttribute && e.target.getAttribute('data-act');
+        overlay.addEventListener('click', (e) => {
+            const btn = e.target.closest && e.target.closest('[data-act]');
+            const act = btn && btn.getAttribute('data-act');
             if (act === 'save') void doSave();
             else if (act === 'remove' && !keyChanging) {
                 input.value = '';
@@ -2058,38 +2340,33 @@
                 setStatus('Removing…', 'wait');
                 void applyApiKey('')
                     .then(() => setStatus('Key removed', ''))
-                    .catch(() => setStatus('✗ Protected storage unavailable', 'bad'));
+                    .catch(() => setStatus('Protected storage unavailable', 'bad'));
             }
         });
         input.addEventListener('keydown', (e) => { if (e.key === 'Enter') void doSave(); });
 
-        qa(modal, '.txm-fa-set-tab').forEach(tab => tab.addEventListener('click', () => {
-            qa(modal, '.txm-fa-set-tab').forEach(t => t.classList.toggle('active', t === tab));
-            qa(modal, '[data-pane]').forEach(p => setShown(p, p.getAttribute('data-pane') === tab.getAttribute('data-tab')));
-        }));
-
-        // Feature toggles - applied and persisted immediately, no save step.
-        qa(modal, '[data-setting]').forEach(box => {
-            const k = box.getAttribute('data-setting');
-            box.checked = !!settings[k];
-            box.addEventListener('change', () => {
-                settings[k] = box.checked;
+        // Feature switches - applied and persisted immediately, no save step.
+        qa(overlay, '[data-setting]').forEach(sw => {
+            const k = sw.getAttribute('data-setting');
+            sw.setAttribute('aria-checked', String(!!settings[k]));
+            sw.addEventListener('click', () => {
+                settings[k] = sw.getAttribute('aria-checked') !== 'true';
+                sw.setAttribute('aria-checked', String(settings[k]));
                 saveSettings();
                 refreshStyle();                              // styleKey carries the buttons toggle
                 schedule();
             });
         });
 
-        q(modal, '.txm-fa-set-close').addEventListener('click', closeSettings);
+        q(overlay, '.txm-fa-set-close').addEventListener('click', closeSettings);
         // Close only when the CLICK began on the backdrop - a text-selection
-        // drag from the key input that ends outside the modal must not close it.
+        // drag from the key input that ends outside the panel must not close it.
         let downOnOverlay = false;
         overlay.addEventListener('mousedown', (e) => { downOnOverlay = e.target === overlay; });
         overlay.addEventListener('click', (e) => { if (e.target === overlay && downOnOverlay) closeSettings(); });
         escClose = (e) => { if (e.key === 'Escape') closeSettings(); };
         document.addEventListener('keydown', escClose);
 
-        overlay.appendChild(modal);
         document.body.appendChild(overlay);
         input.focus();
     }
@@ -2181,7 +2458,7 @@
     // outlive it: only a key change or a denial forgets them, and the war hold still decides Start Fight.
     function teardownAuthorized() {
         Analysis.reset();
-        ['data-txm-hide', 'data-txm-warn', 'data-txm-label', 'data-txm-disarm', 'data-txm-disarm-label', 'data-txm-dialog']
+        ['data-txm-hide', 'data-txm-warn', 'data-txm-label', 'data-txm-disarm', 'data-txm-disarm-label', 'data-txm-dialog', 'data-txm-sel']
             .forEach(attribute => qa(document, `[${attribute}]`).forEach(element => element.removeAttribute(attribute)));
         qa(document, 'a.txm-fa-namelink').forEach(anchor => anchor.replaceWith(...anchor.childNodes));
         const bar = q(document, '.txm-fa-bar');
@@ -2224,7 +2501,6 @@
         safe('dialog', classifyDialog);
         safe('advice', renderAdvice);
         safe('limits', renderLimits);                       // after buttons - it may block START FIGHT
-        safe('inforow', syncInfoRow);
         safe('links', linkDefenderNames);
     }
 
@@ -2281,6 +2557,13 @@
 
     window.addEventListener('resize', schedule);
 
+    // The bar's pop-up lists close on an outside click, and on Esc (focus returns to their trigger).
+    document.addEventListener('click', (e) => { if (!(e.target.closest && e.target.closest('.txm-fa-bar .rra-pick'))) closePops(); });
+    document.addEventListener('keydown', (e) => {
+        const open = e.key === 'Escape' && q(document, '.txm-fa-bar .rra-trigger[aria-expanded="true"]');
+        if (open) { setPop(open, false); open.focus(); }
+    });
+
     // React ticks the header timers via characterData, which the observer never
     // sees (watching characterData on body would fire on every damage number).
     // One bounded poll instead, signature-guarded to zero writes when unchanged.
@@ -2292,7 +2575,6 @@
             if (!refreshData()) { safe('tick-authbar', renderTopBar); return; }
             safe('tick', updateBar);
             safe('tick-limits', renderLimits);              // drives the nextUpdate-paced poll
-            safe('tick-inforow', syncInfoRow);
         });
     }, 1000);
 
